@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type MouseEvent } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type MouseEvent } from 'react'
 import { createRoot } from 'react-dom/client'
 import {
   ArrowDownRight, ArrowRight, ArrowUpRight, ChartNoAxesCombined, Check, ClipboardCheck,
@@ -166,6 +166,7 @@ function App() {
   const main = useRef<HTMLElement>(null)
   const feedback = useRef<HTMLDivElement>(null)
   const refreshButton = useRef<HTMLButtonElement>(null)
+  const refreshFocus = useRef<HTMLButtonElement | null>(null)
   const resetTrigger = useRef<HTMLButtonElement>(null)
   const resetFocusRoute = useRef<string | null>(null)
   const routeView = useRef(view)
@@ -175,16 +176,15 @@ function App() {
 
   const markManagerFresh = useCallback(() => {
     if (routeView.current !== 'manager' || !managerConnected.current) return
+    const button = refreshButton.current
+    if (button && document.activeElement === button) refreshFocus.current = button
     setManagerFresh(true)
     setManagerDisconnected(false)
-    const button = refreshButton.current
-    if (button && document.activeElement === button) requestAnimationFrame(() => {
-      if (!button.isConnected && document.activeElement === document.body) main.current?.focus({ preventScroll: true })
-    })
   }, [])
 
   const navigate = useCallback((route: Route) => {
     if (route.view !== routeView.current) {
+      refreshFocus.current = null
       setManagerFresh(false)
       setManagerDisconnected(false)
     }
@@ -421,6 +421,15 @@ function App() {
     resetFocusRoute.current = null
   }, [busy])
 
+  useLayoutEffect(() => {
+    const button = refreshFocus.current
+    if (!button || busy || loading) return
+    refreshFocus.current = null
+    if (document.activeElement !== document.body && document.activeElement !== button) return
+    if (button.isConnected) button.focus({ preventScroll: true })
+    else main.current?.focus({ preventScroll: true })
+  }, [busy, loading, managerDisconnected, refreshError])
+
   const mutate: RunMutation = useCallback(async (operation, message, next) => {
     if (writing.current) return false
     const startingHash = window.location.hash
@@ -530,7 +539,7 @@ function App() {
   }
 
   async function refreshWorkspace(button: HTMLButtonElement) {
-    const wasFocused = document.activeElement === button
+    if (document.activeElement === button) refreshFocus.current = button
     const previousId = workspaceRef.current?.workspaceId
     const current = await loadWorkspace()
     if (!current) return
@@ -538,12 +547,6 @@ function App() {
     if (stream && current.workspaceId === previousId && stream.readyState === EventSource.CLOSED) {
       setManagerConnectionVersion((version) => version + 1)
     }
-    if (!wasFocused) return
-    requestAnimationFrame(() => {
-      if (document.activeElement !== document.body && document.activeElement !== button) return
-      if (button.isConnected) button.focus({ preventScroll: true })
-      else main.current?.focus({ preventScroll: true })
-    })
   }
 
   const roleKey = `${workspace?.workspaceId ?? ''}:${cardId ?? ''}`
