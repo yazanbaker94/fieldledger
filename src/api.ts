@@ -53,6 +53,7 @@ export class ApiError extends Error {
 
 type RequestOptions = {
   body?: object
+  open?: boolean
   role?: Role
   workspaceId?: string
   idempotencyKey?: string
@@ -60,7 +61,7 @@ type RequestOptions = {
   timeout?: number
 }
 
-async function request(path: string, { body, role, workspaceId, idempotencyKey, signal, timeout = 10000 }: RequestOptions = {}): Promise<Workspace> {
+async function request(path: string, { body, open, role, workspaceId, idempotencyKey, signal, timeout = 10000 }: RequestOptions = {}): Promise<Workspace> {
   const controller = new AbortController()
   const abort = () => controller.abort()
   if (signal?.aborted) abort()
@@ -73,6 +74,7 @@ async function request(path: string, { body, role, workspaceId, idempotencyKey, 
       headers: {
         Accept: 'application/json',
         ...(body && { 'Content-Type': 'application/json' }),
+        ...(open && { 'X-Demo-Open': '1' }),
         ...(role && { 'X-Demo-Role': role }),
         ...(workspaceId && { 'X-Demo-Workspace': workspaceId }),
         ...(idempotencyKey && { 'Idempotency-Key': idempotencyKey }),
@@ -98,12 +100,12 @@ async function request(path: string, { body, role, workspaceId, idempotencyKey, 
   }
 }
 
-async function recoverWrite(write: () => Promise<Workspace>, matches: (workspace: Workspace) => boolean, cardId?: string) {
+async function recoverWrite(workspaceId: string, write: () => Promise<Workspace>, matches: (workspace: Workspace) => boolean, cardId?: string) {
   try {
     return await write()
   } catch (error) {
     if (error instanceof ApiError && error.status < 500 && error.status !== 408 && !(cardId && error.status === 409 && !error.code)) throw error
-    const workspace = await request('/workspace', { timeout: 5000 }).catch(() => null)
+    const workspace = await request('/workspace', { workspaceId, timeout: 5000 }).catch(() => null)
     if (workspace && matches(workspace)) return { ...workspace, affectedCardId: cardId }
     throw error
   }
@@ -121,7 +123,8 @@ function containsDecision(workspace: Workspace, cardId: string, version: number,
 }
 
 export const api = {
-  workspace: (signal?: AbortSignal) => request('/workspace', { signal }),
+  openWorkspace: (signal: AbortSignal) => request('/workspace', { signal, open: true }),
+  readWorkspace: (workspaceId: string) => request('/workspace', { workspaceId }),
   submit: (workspaceId: string, workDate: string, hours: number, requestId: string) =>
     request('/timecards', { body: { workDate, hours, requestId }, role: 'worker', workspaceId }),
   findSubmission: (workspaceId: string, requestId: string) =>
@@ -137,11 +140,13 @@ export const api = {
     }),
   decide: (workspaceId: string, cardId: string, version: number, decision: 'approve' | 'return', reason?: string) =>
     recoverWrite(
+      workspaceId,
       () => request(`/timecards/${encodeURIComponent(cardId)}/decision`, { body: { decision, reason, version }, role: 'foreman', workspaceId }),
       (workspace) => workspace.workspaceId === workspaceId && containsDecision(workspace, cardId, version, decision, reason),
       cardId,
     ),
   reset: (workspaceId: string) => recoverWrite(
+    workspaceId,
     () => request('/reset', { body: {}, workspaceId }),
     (workspace) => workspace.workspaceId !== workspaceId,
   ),

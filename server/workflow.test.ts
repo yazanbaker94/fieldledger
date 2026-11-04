@@ -39,13 +39,14 @@ test('field timecards against PostgreSQL', async (context) => {
     let cookie = '';
     let workspaceId = '';
     return async (endpoint: string, options?: {
-      body?: unknown; role?: string; origin?: string; cookie?: string; workspace?: string | null; fetchSite?: string; idempotencyKey?: string;
+      body?: unknown; role?: string; origin?: string; cookie?: string; workspace?: string | null; fetchSite?: string; idempotencyKey?: string; openWorkspace?: boolean;
     }) => {
       const headers = new Headers();
       const sentCookie = options?.cookie ?? cookie;
       const sentWorkspace = options?.workspace === null ? '' : options?.workspace ?? workspaceId;
       if (sentCookie) headers.set('Cookie', sentCookie);
       if (sentWorkspace) headers.set('X-Demo-Workspace', sentWorkspace);
+      if (endpoint === '/workspace' && (options?.openWorkspace ?? (!sentCookie && !sentWorkspace))) headers.set('X-Demo-Open', '1');
       if (options?.body !== undefined) headers.set('Content-Type', 'application/json');
       if (options?.role) headers.set('X-Demo-Role', options.role);
       if (options?.origin) headers.set('Origin', options.origin);
@@ -67,12 +68,14 @@ test('field timecards against PostgreSQL', async (context) => {
         assert.match(setCookie, /; Secure(?:;|$)/i);
         assert.match(setCookie, /; Path=\/(?:;|$)/i);
         assert.match(setCookie, /SameSite=Lax/i);
-        assert.match(setCookie, /; Max-Age=86400(?:;|$)/i);
+        assert.match(setCookie, /; Expires=[^;]+(?:;|$)/i);
+        assert.doesNotMatch(setCookie, /; Max-Age=/i);
         cookie = setCookie.split(';')[0];
       }
       const data = await response.json();
       if (response.ok && data.workspaceId) workspaceId = data.workspaceId;
-      return { status: response.status, data: data as Workspace, code: data.code as string | undefined, sentCookie, sentWorkspace, setCookie };
+      return { status: response.status, data: data as Workspace, code: data.code as string | undefined,
+        sentCookie, sentWorkspace, setCookie, retryAfter: response.headers.get('Retry-After') };
     };
   }
 
@@ -129,6 +132,62 @@ test('field timecards against PostgreSQL', async (context) => {
     assert.notEqual(original.data.workspaceId, original.setCookie?.split(';')[0].split('=')[1]);
     assert.notEqual(original.data.timecards[0].id, other.data.timecards[0].id);
     assert.deepEqual((await first('/workspace')).data, original.data);
+  });
+
+  await context.test('streams committed workspace changes only to the matching session', async (subtest) => {
+    const controller = new AbortController();
+    const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(10_000)]);
+    subtest.after(() => controller.abort());
+    const url = `${base}/workspace/events`;
+    const active = browser();
+    const separate = browser();
+    const [original, other] = await Promise.all([active('/workspace'), separate('/workspace')]);
+    const activeCookie = original.setCookie!.split(';')[0];
+    const otherCookie = other.setCookie!.split(';')[0];
+    assert.equal((await fetch(url)).status, 409);
+    assert.equal((await fetch(url, { method: 'HEAD' })).status, 405);
+    assert.equal((await fetch(url, { headers: { Cookie: activeCookie, 'Sec-Fetch-Site': 'cross-site' } })).status, 403);
+
+    async function connect(cookie: string) {
+      const response = await fetch(url, { headers: { Cookie: cookie }, signal });
+      assert.equal(response.status, 200);
+      assert.match(response.headers.get('Content-Type') ?? '', /^text\/event-stream/);
+      assert.equal(response.headers.get('Cache-Control'), 'no-store');
+      const reader = response.body!.pipeThrough(new TextDecoderStream()).getReader();
+      let buffer = '';
+      return async () => {
+        while (!buffer.includes('\n\n')) {
+          const { value, done } = await reader.read();
+          assert.equal(done, false);
+          buffer += value;
+        }
+        const end = buffer.indexOf('\n\n');
+        const frame = buffer.slice(0, end);
+        buffer = buffer.slice(end + 2);
+        assert.ok(frame.startsWith('event: change\ndata: '));
+        return JSON.parse(frame.slice('event: change\ndata: '.length));
+      };
+    }
+
+    const [change, separateChange] = await Promise.all([connect(activeCookie), connect(otherCookie)]);
+    assert.deepEqual(await change(), { workspaceId: original.data.workspaceId });
+    assert.deepEqual(await separateChange(), { workspaceId: other.data.workspaceId });
+    const created = await active('/timecards', { role: 'worker', body: submit });
+    assert.equal(created.status, 200);
+    assert.deepEqual(await change(), { workspaceId: original.data.workspaceId });
+    const approved = await active(`/timecards/${created.data.affectedCardId}/decision`, {
+      role: 'foreman', body: { decision: 'approve', version: 1 },
+    });
+    assert.equal(approved.data.project.approvedCents, 1_010_000);
+    assert.deepEqual(await change(), { workspaceId: original.data.workspaceId });
+    const reset = await active('/reset', { body: {} });
+    assert.equal(reset.status, 200);
+    assert.deepEqual(await change(), { workspaceId: reset.data.workspaceId, retiredWorkspaceId: original.data.workspaceId });
+
+    // A reset for the separate session must be the first event it sees after connecting.
+    const otherReset = await separate('/reset', { body: {} });
+    assert.equal(otherReset.status, 200);
+    assert.deepEqual(await separateChange(), { workspaceId: otherReset.data.workspaceId, retiredWorkspaceId: other.data.workspaceId });
   });
 
   await context.test('validates inputs, permissions and client retries', async () => {
@@ -431,8 +490,7 @@ test('field timecards against PostgreSQL', async (context) => {
     await writeFile(rateFixture, (await readFile(rateFixture, 'utf8')).replace(',5000', ',6000'));
     const changedFixtures = await prepareDatabase(pool, pathToFileURL(`${directory}${sep}`));
     assert.equal(changedFixtures.rates[0].rate_cents, 6000);
-    const updatedSession = randomUUID();
-    const before = await newWorkspace(pool, updatedSession, changedFixtures);
+    const { session: updatedSession, workspace: before } = await newWorkspace(pool, changedFixtures);
     assert.equal(before.project.approvedCents, 970_000);
     const pending = await submitCard(pool, updatedSession, before.workspaceId, changedFixtures, { workDate, hours: 8, requestId: randomUUID() });
     assert.equal(pending.project.pendingCents, 40_000);
@@ -442,7 +500,7 @@ test('field timecards against PostgreSQL', async (context) => {
       [fixtures.project.id, fixtures.worker.id, effectiveDate]);
     subtest.after(() => pool.query('DELETE FROM labour_rates WHERE project_id = $1 AND worker_id = $2 AND effective_from = $3',
       [fixtures.project.id, fixtures.worker.id, effectiveDate]).then(() => undefined));
-    const after = await newWorkspace(pool, randomUUID(), changedFixtures);
+    const { workspace: after } = await newWorkspace(pool, changedFixtures);
     const expected = after.timecards.reduce((total, card) => {
       const rate = card.workDate >= effectiveDate ? 6000 : 5000;
       assert.equal(card.rateCents, rate);
@@ -474,28 +532,79 @@ test('field timecards against PostgreSQL', async (context) => {
     assert.equal(oldWrite.status, 409);
     assert.equal(oldWrite.code, 'workspace_changed');
     const staleRead = await first('/workspace', { cookie: reset.sentCookie, workspace: reset.sentWorkspace });
+    assert.equal(staleRead.status, 200);
     assert.equal(staleRead.setCookie, null);
     assert.equal(staleRead.data.workspaceId, reset.data.workspaceId);
     assert.equal((await first('/reset', { body: {} })).status, 429);
     assert.deepEqual((await second('/workspace')).data, beforeReset.data);
   });
 
-  await context.test('recovers an expired workspace without rewriting an existing browser cookie', async () => {
-    const expired = browser();
-    const original = await expired('/workspace');
+  await context.test('uses the stored expiry and leaves an active session cookie unchanged', async () => {
+    const client = browser();
+    const original = await client('/workspace');
+    assert.equal(original.status, 200);
     const session = original.setCookie?.split(';')[0].split('=')[1];
+    const cookieExpiry = original.setCookie?.match(/; Expires=([^;]+)/i)?.[1];
     assert.ok(session);
+    assert.ok(cookieExpiry);
+    const { rows: [row] } = await pool.query<{ expires_at: Date }>('SELECT expires_at FROM demo_sessions WHERE id = $1', [session]);
+    assert.equal(cookieExpiry, row.expires_at.toUTCString());
+    const reopened = await client('/workspace', { workspace: null });
+    assert.equal(reopened.status, 200);
+    assert.equal(reopened.setCookie, null);
+    assert.equal(reopened.data.workspaceId, original.data.workspaceId);
+  });
+
+  await context.test('waits for an expired cookie to go away before opening another writable workspace', async () => {
+    const client = browser();
+    const original = await client('/workspace');
+    const oldCookie = original.setCookie?.split(';')[0];
+    assert.ok(oldCookie);
+    const session = oldCookie.split('=')[1];
     await pool.query(`UPDATE demo_sessions SET expires_at = now() - interval '1 minute' WHERE id = $1`, [session]);
-    const stopped = await expired('/timecards', { role: 'worker', body: submit });
+    const stopped = await client('/timecards', { role: 'worker', body: submit });
     assert.equal(stopped.status, 409);
     assert.equal(stopped.code, 'workspace_expired');
-    const [recovered, concurrent] = await Promise.all([expired('/workspace'), expired('/workspace')]);
-    assert.equal(recovered.status, 200);
-    assert.equal(recovered.setCookie, null);
-    assert.equal(concurrent.setCookie, null);
-    assert.notEqual(recovered.data.workspaceId, original.data.workspaceId);
-    assert.equal(recovered.data.workspaceId, concurrent.data.workspaceId);
-    assert.equal(recovered.data.project.approvedCents, 970_000);
+    const staleRequests = await Promise.all([client('/workspace'), client('/workspace')]);
+    for (const response of staleRequests) {
+      assert.equal(response.status, 429);
+      assert.equal(response.code, 'workspace_expired');
+      assert.equal(response.retryAfter, '1');
+      assert.equal(response.setCookie, null);
+    }
+    const { rows } = await pool.query(`
+      SELECT workspace_id, expires_at <= now() AS expired FROM demo_sessions WHERE id = $1
+    `, [session]);
+    assert.deepEqual(rows, [{ workspace_id: original.data.workspaceId, expired: true }]);
+
+    const before = await pool.query<{ count: number }>('SELECT count(*)::integer AS count FROM demo_sessions');
+    const legacyWithoutCookie = await client('/workspace', { cookie: '', workspace: null, openWorkspace: false });
+    assert.equal(legacyWithoutCookie.status, 429);
+    assert.equal(legacyWithoutCookie.code, 'workspace_expired');
+    assert.equal(legacyWithoutCookie.retryAfter, '1');
+    assert.equal(legacyWithoutCookie.setCookie, null);
+    const readWithoutCookie = await client('/workspace', { cookie: '' });
+    assert.equal(readWithoutCookie.status, 409);
+    assert.equal(readWithoutCookie.code, 'workspace_expired');
+    assert.equal(readWithoutCookie.setCookie, null);
+    const after = await pool.query<{ count: number }>('SELECT count(*)::integer AS count FROM demo_sessions');
+    assert.equal(after.rows[0].count, before.rows[0].count);
+
+    const fresh = await client('/workspace', { cookie: '', workspace: null });
+    assert.equal(fresh.status, 200);
+    assert.notEqual(fresh.data.workspaceId, original.data.workspaceId);
+    assert.ok(fresh.setCookie);
+    const saved = await client('/timecards', { role: 'worker', body: submit });
+    assert.equal(saved.status, 200);
+    assert.ok(saved.data.affectedCardId);
+
+    // A request already carrying the old token must never send a cookie that could replace the fresh one.
+    const late = await client('/workspace', { cookie: oldCookie, workspace: original.data.workspaceId });
+    assert.equal(late.status, 429);
+    assert.equal(late.setCookie, null);
+    const current = await client('/workspace');
+    assert.equal(current.data.workspaceId, fresh.data.workspaceId);
+    assert.ok(current.data.timecards.some((card) => card.id === saved.data.affectedCardId));
   });
 
   await context.test('rolls back the approval if writing its audit record fails', async (subtest) => {
@@ -518,13 +627,14 @@ test('field timecards against PostgreSQL', async (context) => {
   });
 
   await context.test('serves only matching previous-release assets after checking current assets', async (subtest) => {
-    const directory = await mkdtemp(join(tmpdir(), 'fieldledger-test-assets-'));
+    const directory = await mkdtemp(join(tmpdir(), '.fieldledger-test-assets-'));
     const dist = join(directory, 'dist');
     const current = join(dist, 'assets');
     const previous = join(directory, 'previous');
     await mkdir(current, { recursive: true });
     await mkdir(previous);
     const files = [
+      [join(dist, 'index.html'), '<!doctype html><title>FieldLedger</title>'],
       [join(current, 'index-abc12345.js'), 'current script'],
       [join(previous, 'index-abc12345.js'), 'previous script with the same name'],
       [join(previous, 'index-old12345.css'), 'previous stylesheet'],
@@ -539,6 +649,9 @@ test('field timecards against PostgreSQL', async (context) => {
       for (const folder of [current, dist, previous, directory]) await rmdir(folder);
     });
     const origin = `http://127.0.0.1:${(assetServer.address() as AddressInfo).port}`;
+    const html = await fetch(origin, { headers: { Accept: 'text/html' } });
+    assert.equal(html.status, 200);
+    assert.equal(await html.text(), '<!doctype html><title>FieldLedger</title>');
     assert.equal(await (await fetch(`${origin}/assets/index-abc12345.js`)).text(), 'current script');
     const fallback = await fetch(`${origin}/assets/index-old12345.css`);
     assert.equal(fallback.status, 200);

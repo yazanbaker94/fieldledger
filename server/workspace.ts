@@ -133,19 +133,21 @@ async function writtenWorkspace(client: PoolClient, session: string, fixtures: F
   return workspace;
 }
 
-export function newWorkspace(pool: Pool, session: string, fixtures: Fixtures) {
+export function newWorkspace(pool: Pool, fixtures: Fixtures) {
   return transaction(pool, async (client) => {
     await client.query('SELECT pg_advisory_xact_lock(66303401)');
-    const current = await readWorkspace(client, session, fixtures);
-    if (current) return current;
     await client.query('DELETE FROM demo_sessions WHERE expires_at <= now()');
-    const inserted = await client.query(`
+    const inserted = await client.query<{ id: string; expires_at: Date }>(`
       INSERT INTO demo_sessions (id, project_id)
-      SELECT $1, $2 WHERE (SELECT count(*) FROM demo_sessions) < $3
-    `, [session, fixtures.project.id, MAX_SESSIONS]);
-    if (inserted.rowCount !== 1) throw new ApiError(503, 'The demo is at capacity. Please try again later.');
+      SELECT gen_random_uuid(), $1 WHERE (SELECT count(*) FROM demo_sessions) < $2
+      RETURNING id, expires_at
+    `, [fixtures.project.id, MAX_SESSIONS]);
+    const row = inserted.rows[0];
+    if (!row) throw new ApiError(503, 'The demo is at capacity. Please try again later.');
+    const { id: session, expires_at: expiresAt } = row;
     await seedHistory(client, session, fixtures);
-    return writtenWorkspace(client, session, fixtures);
+    const workspace = await writtenWorkspace(client, session, fixtures);
+    return { session, expiresAt, workspace };
   });
 }
 

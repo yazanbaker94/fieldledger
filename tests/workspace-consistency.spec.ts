@@ -116,18 +116,53 @@ test('a failed manager refresh identifies cached costs and offers a retry', asyn
   await other.goto('/#worker')
   await submit(other, '8')
   await button(other, 'Go to foreman').click()
-  await button(other, 'Approve timecard').click()
-  await button(other, 'Go to manager').click()
-  await expect(other.locator('#approved-total')).toHaveText('$10,100')
+  await expect(page.locator('.budget-metrics')).toContainText('$400')
+  await expect(page.getByText('Live project costs')).toBeVisible()
 
-  await page.route('**/api/workspace', (route) => route.fulfill({ status: 503, json: { message: 'Unavailable' } }), { times: 1 })
-  await refocus(page)
+  let failRefresh = true
+  await page.route('**/api/workspace', (route) => failRefresh
+    ? route.fulfill({ status: 503, json: { message: 'Unavailable' } })
+    : route.continue())
+  await button(other, 'Approve timecard').click()
+  await expect(button(other, 'Go to manager')).toBeVisible()
   await expect(page.getByText(/Showing data last synced at/)).toBeVisible()
   await expect(page.getByText('Last saved project costs')).toBeVisible()
   await expect(page.locator('#approved-total')).toHaveText('$9,700')
+  failRefresh = false
   await button(page, 'Refresh workspace').click()
   await expect(page.locator('#approved-total')).toHaveText('$10,100')
+  await expect(page.getByText('Live project costs')).toBeVisible()
   await expect(page.getByText(/Showing data last synced at/)).toHaveCount(0)
+})
+
+test('Manager stays cached when live updates disconnect and can refresh manually', async ({ page }) => {
+  await page.route('**/api/workspace/events', (route) => route.abort())
+  await page.goto('/#manager')
+  await expect(page.locator('#approved-total')).toHaveText('$9,700')
+  await expect(page.getByText('Last saved project costs')).toBeVisible()
+  await expect(page.getByText(/Live updates disconnected/)).toBeVisible()
+
+  const refresh = button(page, 'Refresh workspace')
+  const refreshed = page.waitForResponse((response) => response.url().endsWith('/api/workspace') && response.ok())
+  await refresh.press('Enter')
+  await refreshed
+  await expect(refresh).toBeEnabled()
+  await expect(refresh).toBeFocused()
+  await expect(page.getByText('Last saved project costs')).toBeVisible()
+})
+
+test('Manager can reconnect a closed live stream using the keyboard', async ({ page }) => {
+  await page.route('**/api/workspace/events', (route) => route.fulfill({
+    status: 409, json: { code: 'workspace_expired', message: 'The demo workspace has expired.' },
+  }), { times: 1 })
+  await page.goto('/#manager')
+  const refresh = button(page, 'Refresh workspace')
+  await expect(refresh).toBeVisible()
+  await expect(page.getByText('Last saved project costs')).toBeVisible()
+  await refresh.press('Enter')
+  await expect(page.getByText('Live project costs')).toBeVisible()
+  await expect(refresh).toHaveCount(0)
+  await expect(page.locator('main')).toBeFocused()
 })
 
 test('workspace rate limit preserves the server explanation and waits to enable retry', async ({ page }) => {
@@ -285,7 +320,7 @@ test('entering Manager verifies cached costs before labeling them live', async (
   await page.route('**/api/workspace', async (route) => {
     await heldRefresh
     await route.continue()
-  }, { times: 1 })
+  })
   await page.getByRole('navigation', { name: 'Demo role' }).getByRole('link', { name: 'Manager', exact: true }).click()
   try {
     await expect(page.getByText('Last saved project costs')).toBeVisible()

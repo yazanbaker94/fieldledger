@@ -53,7 +53,7 @@ function writeRoute(view: View, cardId: string | null, replace = false) {
 async function openWorkspace() {
   const controller = new AbortController()
   const timeout = window.setTimeout(() => controller.abort(), 12000)
-  const load = () => api.workspace(controller.signal)
+  const load = () => api.openWorkspace(controller.signal)
   try {
     try {
       if (navigator.locks) return await navigator.locks.request('fieldledger-open-workspace', { signal: controller.signal }, load)
@@ -150,6 +150,8 @@ function App() {
   const [refreshError, setRefreshError] = useState(false)
   const [writeRefreshRequired, setWriteRefreshRequired] = useState(false)
   const [managerFresh, setManagerFresh] = useState(false)
+  const [managerDisconnected, setManagerDisconnected] = useState(false)
+  const [managerConnectionVersion, setManagerConnectionVersion] = useState(0)
   const [transition, setTransition] = useState<ReturnType<typeof workspaceTransition>>(null)
   const [lastSynced, setLastSynced] = useState<Date | null>(null)
   const [busy, setBusy] = useState(false)
@@ -163,13 +165,29 @@ function App() {
   const workspaceRef = useRef<Workspace | null>(null)
   const main = useRef<HTMLElement>(null)
   const feedback = useRef<HTMLDivElement>(null)
+  const refreshButton = useRef<HTMLButtonElement>(null)
   const resetTrigger = useRef<HTMLButtonElement>(null)
   const resetFocusRoute = useRef<string | null>(null)
   const routeView = useRef(view)
   const previousView = useRef<View>('welcome')
+  const managerConnected = useRef(false)
+  const managerStream = useRef<EventSource | null>(null)
+
+  const markManagerFresh = useCallback(() => {
+    if (routeView.current !== 'manager' || !managerConnected.current) return
+    setManagerFresh(true)
+    setManagerDisconnected(false)
+    const button = refreshButton.current
+    if (button && document.activeElement === button) requestAnimationFrame(() => {
+      if (!button.isConnected && document.activeElement === document.body) main.current?.focus({ preventScroll: true })
+    })
+  }, [])
 
   const navigate = useCallback((route: Route) => {
-    if (route.view !== routeView.current) setManagerFresh(false)
+    if (route.view !== routeView.current) {
+      setManagerFresh(false)
+      setManagerDisconnected(false)
+    }
     routeView.current = route.view
     setRoute(route)
   }, [])
@@ -219,12 +237,12 @@ function App() {
     setRefreshError(false)
     setWriteRefreshRequired(false)
     setTransition(workspaceTransition(data.workspaceId))
-    if (routeView.current === 'manager') setManagerFresh(true)
     return data
   }, [])
 
   const loadWorkspace = useCallback(async (showLoading = true) => {
-    const isInitialLoad = workspaceRef.current === null
+    const startingWorkspace = workspaceRef.current
+    const isInitialLoad = startingWorkspace === null
     if (isInitialLoad && (activeLoad.current !== null || initialRetryAt.current > Date.now())) return
     const version = ++fetchVersion.current
     activeLoad.current = version
@@ -233,11 +251,23 @@ function App() {
       setLoadError(null)
     }
     try {
-      let data = await (isInitialLoad ? openWorkspace() : api.workspace())
-      if (version === fetchVersion.current && workspaceTransition(data.workspaceId) === 'retired') data = await api.workspace()
+      const read = async (workspaceId: string) => {
+        try {
+          return await api.readWorkspace(workspaceId)
+        } catch (error) {
+          if (error instanceof ApiError && error.status === 409 && error.code === 'workspace_expired' && version === fetchVersion.current) {
+            return await openWorkspace()
+          }
+          throw error
+        }
+      }
+      let data = await (startingWorkspace ? read(startingWorkspace.workspaceId) : openWorkspace())
+      if (version === fetchVersion.current && workspaceTransition(data.workspaceId) === 'retired') data = await read(data.workspaceId)
       if (version !== fetchVersion.current) return
       if (workspaceTransition(data.workspaceId) === 'retired') throw new Error('The workspace snapshot is retired.')
-      return applyWorkspace(data)
+      const current = applyWorkspace(data)
+      markManagerFresh()
+      return current
     } catch (error) {
       if (version !== fetchVersion.current) return
       if (workspaceRef.current) setRefreshError(true)
@@ -252,7 +282,7 @@ function App() {
       if (activeLoad.current === version) activeLoad.current = null
       if (version === fetchVersion.current) setLoading(false)
     }
-  }, [applyWorkspace])
+  }, [applyWorkspace, markManagerFresh])
 
   useEffect(() => {
     if (!loadError?.retryAt) return
@@ -268,6 +298,78 @@ function App() {
     previousView.current = view
     if (view !== 'welcome' && (!workspaceRef.current || from === 'welcome' || view === 'manager')) void loadWorkspace(!workspaceRef.current)
   }, [view, loadWorkspace])
+
+  const workspaceId = workspace?.workspaceId
+  useEffect(() => {
+    if (view !== 'manager' || !workspaceId) return
+    setManagerFresh(false)
+    if (typeof EventSource === 'undefined') {
+      setManagerDisconnected(true)
+      return
+    }
+    const events = navigator.onLine ? new EventSource('/api/workspace/events') : null
+    managerStream.current = events
+    let refreshTimer = 0
+
+    const changed = (event: MessageEvent<string>) => {
+      if (routeView.current !== 'manager' || !navigator.onLine) return
+      let change: { workspaceId?: unknown; retiredWorkspaceId?: unknown } | null
+      try {
+        change = JSON.parse(event.data)
+      } catch {
+        return
+      }
+      if (typeof change?.workspaceId !== 'string') return
+      managerConnected.current = true
+      setManagerFresh(false)
+      fetchVersion.current += 1
+      setLoading(false)
+
+      if (typeof change.retiredWorkspaceId === 'string' && change.retiredWorkspaceId === workspaceRef.current?.workspaceId) {
+        retireWorkspace(change.retiredWorkspaceId)
+        setTransition('retired')
+        setNotice(null)
+      }
+
+      if (!refreshTimer) refreshTimer = window.setTimeout(() => {
+        refreshTimer = 0
+        void loadWorkspace(false)
+      }, 25)
+    }
+
+    const disconnected = () => {
+      if (routeView.current !== 'manager') return
+      managerConnected.current = false
+      setManagerDisconnected(true)
+      setManagerFresh(false)
+    }
+
+    const offline = () => {
+      events?.close()
+      window.clearTimeout(refreshTimer)
+      refreshTimer = 0
+      disconnected()
+    }
+    const online = () => {
+      if (routeView.current === 'manager' && (!events || events.readyState === EventSource.CLOSED)) {
+        setManagerConnectionVersion((version) => version + 1)
+      }
+    }
+
+    events?.addEventListener('change', changed)
+    events?.addEventListener('error', disconnected)
+    window.addEventListener('offline', offline)
+    window.addEventListener('online', online)
+    if (!events) disconnected()
+    return () => {
+      window.removeEventListener('offline', offline)
+      window.removeEventListener('online', online)
+      events?.close()
+      window.clearTimeout(refreshTimer)
+      managerConnected.current = false
+      managerStream.current = null
+    }
+  }, [view, workspaceId, managerConnectionVersion, loadWorkspace])
 
   useEffect(() => onWorkspaceTransition((id) => {
     if (id !== workspaceRef.current?.workspaceId) return
@@ -342,7 +444,10 @@ function App() {
       // A queued response may describe a workspace another tab has already reset.
       const beforeVerification = workspaceRef.current
       const verificationVersion = ++fetchVersion.current
-      const verified = await api.workspace().catch(() => null)
+      const verified = await api.readWorkspace(data.workspaceId).catch((error: unknown) => {
+        if (error instanceof ApiError && error.code === 'workspace_expired') throw error
+        return null
+      })
       const superseded = verificationVersion !== fetchVersion.current
       // A newer role or focus refresh may already have received a later snapshot.
       const latest = superseded ? (workspaceRef.current !== beforeVerification ? workspaceRef.current : null) : verified
@@ -363,7 +468,10 @@ function App() {
         }
         return false
       }
-      if (!superseded || !latest) applyWorkspace(snapshot)
+      if (!superseded || !latest) {
+        applyWorkspace(snapshot)
+        if (latest) markManagerFresh()
+      }
       if (!latest) {
         setRefreshError(true)
         setWriteRefreshRequired(true)
@@ -382,6 +490,9 @@ function App() {
         if (current && (error.code === 'workspace_changed' || error.code === 'workspace_expired')) {
           setMutationError('The demo workspace changed. You’re now viewing the current workspace.')
         }
+      } else if (error instanceof ApiError && error.code === 'workspace_expired') {
+        setRefreshError(true)
+        setWriteRefreshRequired(true)
       } else if (!(error instanceof ApiError) || error.status >= 500) {
         void loadWorkspace(false)
       }
@@ -390,7 +501,7 @@ function App() {
       writing.current = false
       setBusy(false)
     }
-  }, [applyWorkspace, loadWorkspace, writeRefreshRequired])
+  }, [applyWorkspace, loadWorkspace, markManagerFresh, writeRefreshRequired])
 
   async function reset() {
     if (!resetTarget) return
@@ -420,9 +531,19 @@ function App() {
 
   async function refreshWorkspace(button: HTMLButtonElement) {
     const wasFocused = document.activeElement === button
-    if (await loadWorkspace() && wasFocused && (document.activeElement === document.body || document.activeElement === button)) {
-      main.current?.focus({ preventScroll: true })
+    const previousId = workspaceRef.current?.workspaceId
+    const current = await loadWorkspace()
+    if (!current) return
+    const stream = managerStream.current
+    if (stream && current.workspaceId === previousId && stream.readyState === EventSource.CLOSED) {
+      setManagerConnectionVersion((version) => version + 1)
     }
+    if (!wasFocused) return
+    requestAnimationFrame(() => {
+      if (document.activeElement !== document.body && document.activeElement !== button) return
+      if (button.isConnected) button.focus({ preventScroll: true })
+      else main.current?.focus({ preventScroll: true })
+    })
   }
 
   const roleKey = `${workspace?.workspaceId ?? ''}:${cardId ?? ''}`
@@ -466,10 +587,10 @@ function App() {
               </div>
             )}
             {mutationError && <div className="error-message" role="alert" ref={feedback}>{mutationError}</div>}
-            {refreshError && lastSynced && <div className="error-message workspace-refresh" role="status">
-              <span>Couldn’t refresh the workspace. Showing data last synced at <time dateTime={lastSynced.toISOString()}>{syncTime.format(lastSynced)}</time>.</span>
+            {(refreshError || (view === 'manager' && managerDisconnected)) && lastSynced && <div className="error-message workspace-refresh" role="status">
+              <span>{refreshError ? 'Couldn’t refresh the workspace.' : 'Live updates disconnected.'} Showing data last synced at <time dateTime={lastSynced.toISOString()}>{syncTime.format(lastSynced)}</time>.</span>
               {writeRefreshRequired && <span>Refresh before making another change.</span>}
-              <button className="text-button" type="button" onClick={(event) => void refreshWorkspace(event.currentTarget)} disabled={busy || loading}>Refresh workspace <RotateCcw size={15} /></button>
+              <button ref={refreshButton} className="text-button" type="button" onClick={(event) => void refreshWorkspace(event.currentTarget)} disabled={busy || loading}>Refresh workspace <RotateCcw size={15} /></button>
             </div>}
             {transition === 'resetting' && <p className="panel workspace-loading" role="status">Another tab is resetting this workspace…</p>}
             {transition === 'retired' && !refreshError && <p className="panel workspace-loading" role="status">Opening the current demo workspace…</p>}

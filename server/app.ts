@@ -1,9 +1,9 @@
-import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import type { Pool } from 'pg';
 import { z } from 'zod';
 import type { Fixtures } from './db.js';
+import { createWorkspaceEvents } from './workspace-events.js';
 import {
   ApiError, cardId, decisionInput, decideCard, discardSubmission, newWorkspace, readWorkspace, reconcileSubmission, resetWorkspace,
   resubmitCard, resubmitInput, submitCard, submitInput,
@@ -16,6 +16,7 @@ interface Options {
   previousAssetsDirectory?: string;
   trustProxy?: number;
   newSessionsPerHour?: number;
+  shutdownSignal?: AbortSignal;
 }
 
 function validate<T>(schema: z.ZodType<T>, value: unknown): T {
@@ -80,6 +81,7 @@ export function createApp(pool: Pool, fixtures: Fixtures, options: Options = {})
   const app = express();
   const cookieName = options.secureCookies ? '__Host-fieldledger' : 'fieldledger';
   const limitSession = newSessionLimiter(options.newSessionsPerHour);
+  const events = createWorkspaceEvents(options.shutdownSignal);
   app.disable('x-powered-by');
   if (options.trustProxy) app.set('trust proxy', options.trustProxy);
 
@@ -117,8 +119,8 @@ export function createApp(pool: Pool, fixtures: Fixtures, options: Options = {})
     return session;
   }
 
-  function setSessionCookie(res: Response, session: string) {
-    res.cookie(cookieName, session, { httpOnly: true, sameSite: 'lax', secure: options.secureCookies, path: '/', maxAge: 86_400_000 });
+  function setSessionCookie(res: Response, session: string, expires: Date) {
+    res.cookie(cookieName, session, { httpOnly: true, sameSite: 'lax', secure: options.secureCookies, path: '/', expires });
   }
 
   api.get('/health', async (_req, res) => {
@@ -140,17 +142,41 @@ export function createApp(pool: Pool, fixtures: Fixtures, options: Options = {})
         res.json(workspace);
         return;
       }
+      // A response to a retired token can arrive after another tab has opened a fresh session.
+      // Wait for the browser to stop sending the old cookie before allowing new work.
+      res.set('Retry-After', '1');
+      throw new ApiError(429, 'The old demo session is ending. Try again in a moment.', 'workspace_expired');
+    }
+    // Snapshot reads for an open tab must never issue a cookie, including after browser expiry.
+    if (req.get('X-Demo-Workspace') !== undefined) {
+      throw new ApiError(409, 'The demo session ended. Open a new workspace to continue.', 'workspace_expired');
+    }
+    if (req.get('X-Demo-Open') !== '1') {
+      res.set('Retry-After', '1');
+      throw new ApiError(429, 'Reload this page to open a new demo workspace.', 'workspace_expired');
     }
     const retryAfter = limitSession(req.ip ?? req.socket.remoteAddress ?? 'unknown');
     if (retryAfter !== undefined) {
       res.set('Retry-After', String(retryAfter));
       throw new ApiError(429, 'Too many new demo sessions. Try again later.');
     }
-    // Never reissue a cookie for an existing browser token, even when its workspace expired.
-    const session = existing ?? randomUUID();
-    const workspace = await newWorkspace(pool, session, fixtures);
-    if (!existing) setSessionCookie(res, session);
+    const { session, expiresAt, workspace } = await newWorkspace(pool, fixtures);
+    setSessionCookie(res, session, expiresAt);
     res.json(workspace);
+  });
+
+  api.head('/workspace/events', (_req, res) => res.set('Allow', 'GET').sendStatus(405));
+  api.get('/workspace/events', async (req, res) => {
+    requireSameSite(req);
+    const session = requireSession(req);
+    const { rows: [active] } = await pool.query<{ workspace_id: string; expires_at: Date }>(`
+      SELECT workspace_id, expires_at FROM demo_sessions WHERE id = $1 AND project_id = $2 AND expires_at > now()
+    `, [session, fixtures.project.id]);
+    if (res.destroyed || res.writableEnded) return;
+    if (!active) throw new ApiError(409, 'The demo workspace has expired.', 'workspace_expired');
+    if (!events.subscribe(session, res, { workspaceId: active.workspace_id }, active.expires_at)) {
+      throw new ApiError(429, 'The live workspace connection is unavailable. Refresh to check for changes.');
+    }
   });
 
   api.get('/timecards/submissions/:requestId', async (req, res) => {
@@ -161,13 +187,17 @@ export function createApp(pool: Pool, fixtures: Fixtures, options: Options = {})
 
   api.post('/timecards/submissions/:requestId/discard', async (req, res) => {
     requireRole(req, 'worker');
-    const workspace = await discardSubmission(pool, requireSession(req), requireWorkspace(req), fixtures, validate(cardId, req.params.requestId));
+    const session = requireSession(req);
+    const workspace = await discardSubmission(pool, session, requireWorkspace(req), fixtures, validate(cardId, req.params.requestId));
+    events.publish(session, { workspaceId: workspace.workspaceId });
     res.json(workspace);
   });
 
   api.post('/timecards', async (req, res) => {
     requireRole(req, 'worker');
-    const workspace = await submitCard(pool, requireSession(req), requireWorkspace(req), fixtures, validate(submitInput, req.body));
+    const session = requireSession(req);
+    const workspace = await submitCard(pool, session, requireWorkspace(req), fixtures, validate(submitInput, req.body));
+    events.publish(session, { workspaceId: workspace.workspaceId });
     res.json(workspace);
   });
 
@@ -178,13 +208,17 @@ export function createApp(pool: Pool, fixtures: Fixtures, options: Options = {})
       throw new ApiError(400, 'The correction request IDs must match.');
     }
     const body = key === undefined ? req.body : { ...req.body, requestId: key };
-    const workspace = await resubmitCard(pool, requireSession(req), requireWorkspace(req), fixtures, validate(cardId, req.params.id), validate(resubmitInput, body));
+    const session = requireSession(req);
+    const workspace = await resubmitCard(pool, session, requireWorkspace(req), fixtures, validate(cardId, req.params.id), validate(resubmitInput, body));
+    events.publish(session, { workspaceId: workspace.workspaceId });
     res.json(workspace);
   });
 
   api.post('/timecards/:id/decision', async (req, res) => {
     requireRole(req, 'foreman');
-    const workspace = await decideCard(pool, requireSession(req), requireWorkspace(req), fixtures, validate(cardId, req.params.id), validate(decisionInput, req.body));
+    const session = requireSession(req);
+    const workspace = await decideCard(pool, session, requireWorkspace(req), fixtures, validate(cardId, req.params.id), validate(decisionInput, req.body));
+    events.publish(session, { workspaceId: workspace.workspaceId });
     res.json(workspace);
   });
 
@@ -192,6 +226,7 @@ export function createApp(pool: Pool, fixtures: Fixtures, options: Options = {})
     const session = requireSession(req);
     const retiringId = requireWorkspace(req);
     const workspace = await resetWorkspace(pool, session, retiringId, fixtures);
+    events.publish(session, { workspaceId: workspace.workspaceId, retiredWorkspaceId: retiringId });
     // Set a browser-wide fence even when an older open bundle made the request.
     const marker = `${options.secureCookies ? '__Host-' : ''}fieldledger-retired-${retiringId}`;
     res.cookie(marker, '1', { sameSite: 'lax', secure: options.secureCookies, path: '/', maxAge: 120_000 });
@@ -219,7 +254,7 @@ export function createApp(pool: Pool, fixtures: Fixtures, options: Options = {})
         next();
         return;
       }
-      res.set('Cache-Control', 'no-cache').sendFile(path.join(directory, 'index.html'));
+      res.set('Cache-Control', 'no-cache').sendFile('index.html', { root: directory });
     });
   }
 

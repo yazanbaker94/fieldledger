@@ -10,7 +10,7 @@ FieldLedger is a working construction timecard and labour-costing demo. It follo
 2. As **Foreman**, approve the card or return it with a note. **Go to worker** opens the returned card for correction. Resubmit it and follow the card back to the foreman for approval.
 3. After approval, **Go to manager** shows the updated budget. **View approved timecard** jumps to that card’s cost breakdown and review history. The eight hours add CAD $400 to the CAD $9,700 already approved. The project moves to CAD $10,100 against its CAD $10,000 labour budget.
 
-Each browser gets its own demo workspace backed by PostgreSQL. Refreshing the page preserves its data during the 24-hour session. The role switcher is intentionally available to demo visitors. **Reset demo** restores that browser's starting data. The contractor, workers, rates, and project data are fictional.
+Each browser gets its own demo workspace backed by PostgreSQL. Refreshing the page preserves its data during the 24-hour session. If a tab is still running an older build when its session ends, reload the page to open a new workspace. The role switcher is intentionally available to demo visitors. **Reset demo** restores that browser's starting data. The contractor, workers, rates, and project data are fictional.
 
 ## Screens from the running app
 
@@ -42,7 +42,7 @@ For UI development, run `npm run dev:api` and `npm run dev` in separate terminal
 - Foreman and manager selections stay in the URL across reloads. A changed revision requires an explicit review before approval. A Worker handoff link continues to show the same card after correction.
 - Audit history records the hours and work date on new submissions and preserves both values when a card is corrected.
 - CSV fixtures supply initial reference values. Once imported, PostgreSQL rates determine the cost of both newly seeded history and new timecards using each work date.
-- The budget view sums approved timecards in SQL. Pending labour is displayed separately. The approval, cost, and audit event commit in one transaction.
+- The budget view sums approved timecards in SQL. Pending labour is displayed separately. The approval, cost, and audit event commit in one transaction. Open Manager views in the same workspace refresh after changes and identify cached figures if the live connection drops.
 - The prototype uses one assigned project and regular-time labour in Canadian dollars. Its budget comparison uses approved labour cost.
 
 ### Foundry mapping

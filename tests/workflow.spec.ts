@@ -152,18 +152,48 @@ test("a failed workspace request can be retried in the browser", async ({ page }
   await expect(page.getByRole("heading", { name: "Log a timecard" })).toBeVisible();
 });
 
-test("a manager returning to an existing tab sees the approval made in another tab", async ({ page, context }) => {
+test("a Manager tab receives an approval without refocusing", async ({ page, context }) => {
   await enterDemo(page);
   await submitTimecard(page, 8);
   const manager = await context.newPage();
   await manager.goto("/#manager");
   await expect(manager.locator("#approved-total")).toContainText("$9,700");
+  await expect(manager.getByText("Live project costs")).toBeVisible();
 
-  await role(page, "Foreman").click();
-  await page.getByRole("button", { name: "Approve timecard" }).click();
-  await expect(page.getByText("Timecard approved.", { exact: true })).toBeVisible();
-  await manager.evaluate(() => window.dispatchEvent(new Event("focus")));
+  const workspace = await (await context.request.get("/api/workspace")).json();
+  const card = workspace.timecards.find((entry: { status: string }) => entry.status === "pending");
+  const approval = await context.request.post(`/api/timecards/${card.id}/decision`, {
+    headers: { "X-Demo-Workspace": workspace.workspaceId, "X-Demo-Role": "foreman" },
+    data: { decision: "approve", version: card.version },
+  });
+  expect(approval.ok()).toBe(true);
   await expect(manager.locator("#approved-total")).toContainText("$10,100");
+  await expect(manager.getByText("Live project costs")).toBeVisible();
+});
+
+test("Manager shows cached costs offline and catches up after reconnecting", async ({ page, context }) => {
+  await enterDemo(page);
+  await submitTimecard(page, 8);
+  await role(page, "Manager").click();
+  await expect(page.getByText("Live project costs")).toBeVisible();
+  const workspace = await (await context.request.get("/api/workspace")).json();
+  const card = workspace.timecards.find((entry: { status: string }) => entry.status === "pending");
+
+  await context.setOffline(true);
+  try {
+    await expect(page.getByText("Last saved project costs")).toBeVisible();
+    await expect(page.getByText(/Live updates disconnected/)).toBeVisible();
+    const approval = await context.request.post(`/api/timecards/${card.id}/decision`, {
+      headers: { "X-Demo-Workspace": workspace.workspaceId, "X-Demo-Role": "foreman" },
+      data: { decision: "approve", version: card.version },
+    });
+    expect(approval.ok()).toBe(true);
+    await expect(page.locator("#approved-total")).toHaveText("$9,700");
+  } finally {
+    await context.setOffline(false);
+  }
+  await expect(page.locator("#approved-total")).toHaveText("$10,100");
+  await expect(page.getByText("Live project costs")).toBeVisible();
 });
 
 test("leaving and re-entering the demo during first load keeps a single workspace request", async ({ page }) => {

@@ -17,6 +17,7 @@ const trustProxy = Number(process.env.TRUST_PROXY ?? '0');
 if (!Number.isInteger(trustProxy) || trustProxy < 0) throw new Error('TRUST_PROXY must be a nonnegative proxy hop count.');
 
 const pool = new Pool({ connectionString: databaseUrl, connectionTimeoutMillis: 5000, statement_timeout: 10000 });
+const lifetime = new AbortController();
 pool.on('error', (error) => console.error('Idle database connection error', error.message));
 
 try {
@@ -34,6 +35,7 @@ try {
     previousAssetsDirectory,
     trustProxy,
     newSessionsPerHour: process.env.NODE_ENV === 'test' ? 100 : undefined,
+    shutdownSignal: lifetime.signal,
   });
   const cleanup = setInterval(() => {
     void pool.query('DELETE FROM demo_sessions WHERE expires_at <= now()').catch((error) => console.error('Demo cleanup error', error.message));
@@ -42,6 +44,7 @@ try {
 
   const server = app.listen(port, process.env.HOST ?? '127.0.0.1', () => console.log(`Field Ledger listening on port ${port}`));
   const shutdown = () => {
+    lifetime.abort();
     clearInterval(cleanup);
     server.close(() => void pool.end());
   };
