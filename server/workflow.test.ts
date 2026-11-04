@@ -191,10 +191,33 @@ test('field timecards against PostgreSQL', async (context) => {
     assert.equal(alreadySaved.status, 200);
     assert.equal(alreadySaved.data.affectedCardId, saved.data.affectedCardId);
     assert.equal(alreadySaved.data.project.pendingCents, 35_000);
+    const cardId = saved.data.affectedCardId;
+    assert.ok(cardId);
+    assert.equal((await client(`/timecards/${cardId}/decision`, {
+      role: 'foreman', body: { decision: 'return', reason: 'Correct the duration', version: 1 },
+    })).status, 200);
+    const reuse = await client(`/timecards/${cardId}/resubmit`, {
+      ...worker, body: { ...draft, version: 2 },
+    });
+    assert.equal(reuse.status, 409);
+    assert.equal(reuse.code, 'submission_discarded');
+    assert.equal((await client(receipt)).status, 410);
+    assert.equal((await client('/workspace')).data.timecards.find((card) => card.id === cardId)?.status, 'returned');
+
+    const sessionId = before.setCookie?.split(';')[0].split('=')[1];
+    assert.ok(sessionId);
+    const blocked = { code: '23514', constraint: 'timecard_request_not_discarded' };
+    // Older releases can write directly without consulting the discard table.
+    await assert.rejects(pool.query(`INSERT INTO timecards (session_id, project_id, worker_id, work_date, hours, status, request_id, request_digest)
+      VALUES ($1, $2, $3, $4, 8, 'pending', $5, 'legacy')`,
+    [sessionId, fixtures.project.id, fixtures.worker.id, workDate, draft.requestId]), blocked);
+    await assert.rejects(pool.query(`INSERT INTO timecard_correction_receipts (session_id, workspace_id, request_id, timecard_id, request_digest)
+      VALUES ($1, $2, $3, $4, 'legacy')`, [sessionId, before.data.workspaceId, draft.requestId, cardId]), blocked);
 
     assert.equal((await client('/reset', { body: {} })).status, 200);
     assert.equal((await client(receipt)).status, 404);
     assert.equal((await client('/timecards', { ...worker, workspace: before.data.workspaceId, body: draft })).code, 'workspace_changed');
+    assert.equal((await client('/timecards', { ...worker, body: draft })).status, 200);
   });
 
   await context.test('returns, corrects and approves once, preserving the audit trail', async () => {
@@ -269,7 +292,8 @@ test('field timecards against PostgreSQL', async (context) => {
     assert.ok(cardId);
     const decision = `/timecards/${cardId}/decision`;
     const resubmit = `/timecards/${cardId}/resubmit`;
-    assert.equal((await client(decision, { role: 'foreman', body: { decision: 'return', version: 1, reason: 'Correct the date and duration' } })).status, 200);
+    const firstReturn = { role: 'foreman', body: { decision: 'return', version: 1, reason: 'Correct the date and duration' } };
+    assert.equal((await client(decision, firstReturn)).status, 200);
     const correctionId = randomUUID();
     const firstCorrection = { role: 'worker', body: { workDate: initial.data.timecards[0].workDate, hours: 6, version: 2, requestId: correctionId } };
     assert.equal((await client(`/timecards/submissions/${correctionId}`)).status, 404);
@@ -280,7 +304,11 @@ test('field timecards against PostgreSQL', async (context) => {
     const [corrected, duplicate] = await Promise.all([client(resubmit, byHeader), client(resubmit, firstCorrection)]);
     assert.equal(corrected.data.affectedCardId, cardId);
     assert.equal(duplicate.data.affectedCardId, cardId);
-    assert.equal((await client(decision, { role: 'foreman', body: { decision: 'return', version: 3, reason: 'Use the original date' } })).status, 200);
+    const confirmedReturn = await client(decision, firstReturn);
+    assert.equal(confirmedReturn.status, 200);
+    assert.deepEqual(confirmedReturn.data, corrected.data);
+    const secondReturn = { role: 'foreman', body: { decision: 'return', version: 3, reason: 'Use the original date' } };
+    assert.equal((await client(decision, secondReturn)).status, 200);
     const secondCorrection = { role: 'worker', body: { workDate, hours: 7, version: 4, requestId: randomUUID() } };
     assert.equal((await client(resubmit, secondCorrection)).status, 200);
     assert.equal((await client(decision, { role: 'foreman', body: { decision: 'approve', version: 5 } })).status, 200);
@@ -288,6 +316,14 @@ test('field timecards against PostgreSQL', async (context) => {
     const reconciled = await client(`/timecards/submissions/${correctionId}`);
     assert.equal(replay.data.affectedCardId, cardId);
     assert.deepEqual(reconciled.data, replay.data);
+    for (const action of [firstReturn, secondReturn]) {
+      const replayedReturn = await client(decision, action);
+      assert.equal(replayedReturn.status, 200);
+      assert.deepEqual(replayedReturn.data, replay.data);
+    }
+    assert.equal((await client(decision, { ...firstReturn, body: { ...firstReturn.body, reason: secondReturn.body.reason } })).status, 409);
+    assert.equal((await client(decision, { ...firstReturn, body: { ...firstReturn.body, version: 2 } })).status, 409);
+    assert.equal((await client(decision, { role: 'foreman', body: { decision: 'approve', version: 1 } })).status, 409);
     assert.equal((await second(`/timecards/submissions/${correctionId}`)).status, 404);
     assert.equal((await client(resubmit, { ...firstCorrection, body: { ...firstCorrection.body, hours: 5 } })).status, 409);
     assert.equal((await client('/timecards', { role: 'worker', body: { workDate, hours: 8, requestId: correctionId } })).status, 409);

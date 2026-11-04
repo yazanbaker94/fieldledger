@@ -7,8 +7,9 @@ sandbox=$(mktemp -d "$temp_dir/fieldledger-release-test.XXXXXXXX")
 [[ $(realpath "$sandbox") == "$temp_dir"/fieldledger-release-test.* ]]
 trap 'rm -rf -- "$sandbox"' EXIT
 export MSYS=winsymlinks:native
-export REAL_FLOCK
+export REAL_FLOCK REAL_READLINK
 REAL_FLOCK=$(command -v flock || true)
+REAL_READLINK=$(command -v readlink)
 bin=$sandbox/bin
 fixture=$sandbox/fixture
 mkdir -p "$bin" "$fixture/deploy" "$fixture/server"
@@ -35,6 +36,18 @@ case ${0##*/} in
     printf 'lock\n' >> "$TEST_STATE/events"
     if [[ -n $REAL_FLOCK ]]; then exec "$REAL_FLOCK" "$@"; fi
     ;;
+  readlink)
+    if [[ $* == '-e -- /proc/8472/cwd' ]]; then
+      exec "$REAL_READLINK" -e -- "$TEST_APP/current"
+    fi
+    exec "$REAL_READLINK" "$@"
+    ;;
+  ss)
+    [[ $* == '-Hltnp4 sport = :3088' && -f "$TEST_STATE/active" ]]
+    pid=8472
+    if [[ $FAIL_PHASE == listener ]] && grep -q 'candidate' "$TEST_UNIT"; then pid=8473; fi
+    printf 'LISTEN 0 511 127.0.0.1:3088 0.0.0.0:* users:(("node",pid=%s,fd=24))\n' "$pid"
+    ;;
   systemctl)
     if [[ -n $REAL_FLOCK ]] && "$REAL_FLOCK" --nonblock "$TEST_APP/deploy.lock" true; then
       echo 'systemctl called outside the deploy lock' >&2
@@ -42,6 +55,10 @@ case ${0##*/} in
     fi
     case $1 in
       is-active) [[ -f "$TEST_STATE/active" ]] ;;
+      show)
+        [[ $* == 'show -p MainPID --value fieldledger.service' && -f "$TEST_STATE/active" ]]
+        printf '8472\n'
+        ;;
       daemon-reload) : ;;
       stop) rm -f "$TEST_STATE/active" ;;
       restart)
@@ -75,6 +92,10 @@ case ${0##*/} in
         ;;
       */)
         if [[ $FAIL_PHASE == page ]] && grep -q 'candidate' "$TEST_UNIT"; then exit 22; fi
+        if [[ $FAIL_PHASE == origin ]] && grep -q 'candidate' "$TEST_UNIT"; then
+          printf '<script src="/assets/index-stale000.js"></script>\n'
+          exit 0
+        fi
         cat "$TEST_APP/current/dist/index.html"
         ;;
     esac
@@ -82,7 +103,7 @@ case ${0##*/} in
   *) exit 99 ;;
 esac
 EOF
-for command in sudo npm systemd-analyze sleep flock systemctl curl; do
+for command in sudo npm systemd-analyze sleep flock readlink ss systemctl curl; do
   cp "$bin/mock" "$bin/$command"
   chmod +x "$bin/$command"
 done
@@ -105,6 +126,7 @@ run_release() {
   sed -e "s|^app_root=/opt/fieldledger$|app_root='$TEST_APP'|" \
     -e "s|^unit=/etc/systemd/system/fieldledger.service$|unit='$TEST_UNIT'|" \
     -e "s|/tmp/fieldledger-release\.XXXXXXXX|$sandbox/stage.XXXXXXXX|" \
+    -e 's/for attempt in {1\.\.20}/for attempt in {1..2}/' \
     "$source_dir/native-release.sh" > "$TEST_STATE/deploy.sh"
   if grep -qE '^app_root=/opt/|^unit=/etc/|/tmp/fieldledger-release\.XXXXXXXX' "$TEST_STATE/deploy.sh"; then
     echo 'The deployment test could not isolate the target paths.' >&2
@@ -145,10 +167,12 @@ cmp "$repeat/dist/assets/index-second00.js" "$TEST_APP/current/previous-assets/i
 previous=$(readlink "$TEST_APP/current")
 printf '[Unit]\nDescription=previous\n' > "$TEST_UNIT"
 previous_failed=''
-for phase in validation restart page health; do
+for phase in validation restart listener origin page health; do
   case $phase in
     validation) failed_asset=badbuild ;;
     restart) failed_asset=restart0 ;;
+    listener) failed_asset=badpid00 ;;
+    origin) failed_asset=badorig0 ;;
     page) failed_asset=badpage0 ;;
     health) failed_asset=badhlth0 ;;
   esac

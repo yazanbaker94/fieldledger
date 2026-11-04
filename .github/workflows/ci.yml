@@ -36,6 +36,23 @@ jobs:
       - run: npm run build
       - run: npm test
       - run: bash deploy/test-native-release.sh
+      - run: bash deploy/test-compose-assets.sh
+      - name: Verify Compose image and asset volume
+        env:
+          POSTGRES_PASSWORD: compose-test-only
+        run: |
+          compose=(docker compose -p fieldledger-assets-ci)
+          trap '"${compose[@]}" down --volumes' EXIT
+          "${compose[@]}" config --quiet
+          "${compose[@]}" build app
+          "${compose[@]}" run --rm --no-deps -T app sh -ec '
+            test "$(id -un)" = node
+            test "$(stat -c %u /app/asset-cache)" = "$(id -u)"
+            test "$(stat -c %u /app/asset-cache/.lock)" = "$(id -u)"
+            snapshot=$(readlink -e /app/asset-cache/current)
+            test "$PREVIOUS_ASSETS_DIRECTORY" = "$snapshot/previous-assets"
+            diff -qr /app/dist/assets "$snapshot/assets"
+          '
       - run: bash deploy/test-postgresql-recovery.sh
       - run: npx playwright install --with-deps chromium
       - run: npm run test:browser

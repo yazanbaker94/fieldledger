@@ -278,8 +278,14 @@ svg { display: block; flex-shrink: 0; }
 }
 
 @media (max-width: 680px) {
-  .hero { grid-template-columns: 1fr; }
-  .hero-image { min-height: 200px; }
+  .hero { grid-template-columns: minmax(0, 1fr); overflow-wrap: anywhere; }
+  .hero-copy { min-width: 0; }
+  .hero-eyebrow { gap: 7px; letter-spacing: .08em; }
+  .hero h1, .hero-eyebrow { hyphens: auto; }
+  .hero-cta { max-width: 100%; text-align: left; }
+  .hero-note span, .map-marker { flex-shrink: 0; }
+  .hero-image { display: grid; align-items: end; min-height: 200px; padding: 16px 15px; }
+  .hero-image figcaption { position: relative; inset: auto; }
   .desktop-break { display: none; }
 }
 
@@ -308,12 +314,13 @@ svg { display: block; flex-shrink: 0; }
   .role-nav { max-width: 100%; flex-wrap: wrap; gap: 2px; }
   .role-nav a { min-height: 39px; gap: 4px; font-size: .75rem; padding: 5px 6px; }
   .role-nav svg { width: 14px; height: 14px; }
-  .role-count { min-width: 16px; height: 16px; padding-inline: 3px; }
+  .role-count { min-width: 16px; min-height: 16px; height: auto; padding-inline: 3px; line-height: 1.2; }
   .reset-button { font-size: .72rem; gap: 4px; padding: 6px 2px; min-height: 37px; }
   .reset-button svg { width: 13px; height: 13px; }
-  .workspace-heading { display: grid; gap: 10px; margin-bottom: 16px; }
+  .workspace-heading { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; margin-bottom: 16px; overflow-wrap: anywhere; }
+  .workspace-heading h1 { hyphens: auto; }
   .workspace-heading p:not(.eyebrow) { font-size: .84rem; }
-  .persona { justify-self: start; padding: 4px 7px 4px 4px; }
+  .persona { justify-self: start; min-width: 0; max-width: 100%; padding: 4px 7px 4px 4px; }
   .avatar { width: max(29px, 1.65em); height: max(29px, 1.65em); flex-shrink: 0; }
   .panel-heading { min-height: 50px; padding: 12px 13px; flex-wrap: wrap; }
   .panel-heading > div, .card-summary-header > div { min-width: 0; overflow-wrap: anywhere; }
@@ -341,13 +348,14 @@ svg { display: block; flex-shrink: 0; }
 }
 
 @media (max-width: 390px) {
-  .next-step { grid-template-columns: auto 1fr; }
+  .next-step { grid-template-columns: auto minmax(0, 1fr); }
   .next-step .text-button { grid-column: 2; }
   .decision-actions .button { width: 100%; }
   .row-correction { align-items: start; flex-direction: column; }
-  .card-row-cost { display: flex; flex-wrap: wrap; }
+  .card-row { display: flex; flex-wrap: wrap; }
+  .card-row-title { flex: 1 1 6em; }
+  .row-chevron { margin-inline-start: auto; }
   .card-row-cost .card-row-title { flex: 1 1 4.25em; }
-  .card-row-cost .row-chevron { margin-inline-start: auto; }
   .card-row-cost .card-row-icon { display: none; }
   .budget-header { gap: 5px; }
   .budget-state { font-size: .67rem; }

@@ -4,7 +4,7 @@
 
 The native deployment runs FieldLedger under its own system user. PostgreSQL authenticates that user over a local Unix socket. Caddy serves the dedicated hostname over HTTPS, with DNS managed in Cloudflare.
 
-Install Node.js 22.12 or later and PostgreSQL 18. On a fresh Ubuntu 26.04 VPS with those packages, run the following once to create the app account and database.
+Install Node.js 22.12 or later, PostgreSQL 18, and `iproute2`. On a fresh Ubuntu 26.04 VPS with those packages, run the following once to create the app account and database.
 
 ```sh
 sudo useradd --system --user-group --no-create-home --shell /usr/sbin/nologin fieldledger
@@ -13,7 +13,7 @@ sudo -u postgres createdb --owner=fieldledger fieldledger
 sudo -u fieldledger psql -d fieldledger -c 'select current_user;'
 ```
 
-From a clone on the VPS, deploy a reviewed commit. The script builds the release, validates its service unit, and serializes service changes with a host-local lock. It checks both the health endpoint and app page before completing. If an update fails, it restores the previous unit and release, then checks the restored service if it was running. A failed first deployment removes its service unit and release. The first successful deployment enables the service on boot. Updates start the service and preserve its existing boot configuration.
+From a clone on the VPS, deploy a reviewed commit. The script builds the release, validates its service unit, and serializes service changes with a host-local lock. It verifies that the service process owns the HTTP listener, is running from the expected release directory, and serves the expected app page and healthy API. If an update fails, it restores the previous unit and release, then checks the restored service if it was running. A failed first deployment removes its service unit and release. The first successful deployment enables the service on boot. Updates start the service and preserve its existing boot configuration.
 
 The native app also serves hashed assets from the previous distinct asset build. This covers browsers that received its HTML during a deployment. Rebuilding identical assets preserves that fallback. After a rollback, the restored release also serves the latest failed candidate's hashed assets for browsers that already received its page. A later failed cutover replaces those candidate assets, and the next healthy deployment establishes a fresh fallback. After a healthy deployment, the script retains the active release and the one it replaced for rollback, then removes older managed release directories. Hard links keep each retained release's fallback available through that cleanup and through rollback.
 
@@ -69,4 +69,20 @@ If you already have a Cloudflare connector or HTTPS reverse proxy running direct
 
 ### Updates and troubleshooting
 
-After pulling a reviewed revision, rerun `docker compose up -d --build --wait` with the same profile options. Run `docker compose ps` and `docker compose logs --tail=100 app db` for health and startup diagnostics. The `pgdata` volume survives normal updates. Back it up before a database major-version upgrade.
+After pulling a reviewed revision, rerun `docker compose up -d --build --wait` with the same profile options. The `app-assets` volume keeps the previous distinct hashed bundle available through container replacement. Retain that volume across updates.
+
+If the running container predates the asset cache, seed the volume once before replacing it. Run this from the updated checkout while the old app is still running.
+
+```bash
+set -o pipefail
+docker compose build app
+docker compose exec -T app tar -C /app/dist -cf - assets |
+  docker compose run --rm --no-deps -T --entrypoint sh app -ec '
+    source_dir=$(mktemp -d)
+    tar -xf - -C "$source_dir"
+    FIELDLEDGER_ASSET_SOURCE="$source_dir/assets" sh /usr/local/bin/fieldledger-entrypoint true
+  '
+docker compose up -d --wait
+```
+
+Run `docker compose ps` and `docker compose logs --tail=100 app db` for health and startup diagnostics. The `pgdata` volume survives normal updates. Back it up before a database major-version upgrade.

@@ -125,3 +125,27 @@ CREATE TABLE IF NOT EXISTS discarded_timecard_submissions (
   request_id uuid NOT NULL,
   PRIMARY KEY (session_id, workspace_id, request_id)
 );
+
+-- Enforce discards even when an older server binary runs against this database.
+CREATE OR REPLACE FUNCTION reject_discarded_timecard_request() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  PERFORM 1 FROM demo_sessions WHERE id = NEW.session_id FOR UPDATE;
+  IF EXISTS (
+    SELECT 1 FROM discarded_timecard_submissions discarded
+    JOIN demo_sessions session ON session.id = discarded.session_id AND session.workspace_id = discarded.workspace_id
+    WHERE discarded.session_id = NEW.session_id AND discarded.request_id = NEW.request_id
+  ) THEN
+    RAISE EXCEPTION 'This unsaved submission was discarded.'
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'timecard_request_not_discarded';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE TRIGGER timecard_request_not_discarded
+  BEFORE INSERT ON timecards FOR EACH ROW WHEN (NEW.request_id IS NOT NULL)
+  EXECUTE FUNCTION reject_discarded_timecard_request();
+
+CREATE OR REPLACE TRIGGER correction_request_not_discarded
+  BEFORE INSERT ON timecard_correction_receipts FOR EACH ROW
+  EXECUTE FUNCTION reject_discarded_timecard_request();

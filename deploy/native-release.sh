@@ -29,11 +29,15 @@ install_unit() {
 }
 
 wait_for_health() {
-  local attempt
+  local expected_release=$1 attempt pid
   for attempt in {1..20}; do
     if systemctl is-active --quiet fieldledger.service &&
+      pid=$(systemctl show -p MainPID --value fieldledger.service) && [[ $pid =~ ^[1-9][0-9]*$ ]] &&
+      [[ $(sudo -n readlink -e -- "/proc/$pid/cwd") == "$expected_release" ]] &&
+      sudo -n ss -Hltnp4 'sport = :3088' | awk -v pid="$pid" '$4 == "127.0.0.1:3088" && index($0, "pid=" pid ",") { found=1 } END { exit !found }' &&
       curl --silent --fail --max-time 2 http://127.0.0.1:3088/api/health >/dev/null &&
-      curl --silent --fail --max-time 2 http://127.0.0.1:3088/ >/dev/null; then
+      curl --silent --fail --max-time 2 http://127.0.0.1:3088/ | cmp -s -- "$expected_release/dist/index.html" - &&
+      [[ $(systemctl show -p MainPID --value fieldledger.service) == "$pid" ]]; then
       return 0
     fi
     sleep 1
@@ -105,7 +109,7 @@ restore_previous() {
   sudo -n rm -f -- "$unit.next" "$current.next" || failed=1
   sudo -n systemctl daemon-reload || failed=1
   if (( was_active && service_touched && ! failed )); then
-    sudo -n systemctl restart fieldledger.service && wait_for_health || failed=1
+    sudo -n systemctl restart fieldledger.service && wait_for_health "$previous_release" || failed=1
   fi
   return "$failed"
 }
@@ -162,6 +166,10 @@ git archive "$revision" | tar -xf - -C "$stage"
   npm prune --omit=dev --no-audit --no-fund
 )
 systemd-analyze verify "$stage/deploy/fieldledger.service"
+if ! command -v ss >/dev/null; then
+  echo 'Install iproute2 before deploying FieldLedger.' >&2
+  exit 1
+fi
 
 sudo -n install -d -m 0755 "$app_root/releases"
 sudo -n touch "$app_root/deploy.lock"
@@ -217,7 +225,7 @@ install_unit "$stage/deploy/fieldledger.service"
 activate "$release"
 sudo -n systemctl daemon-reload
 service_touched=1
-if ! sudo -n systemctl restart fieldledger.service || ! wait_for_health; then
+if ! sudo -n systemctl restart fieldledger.service || ! wait_for_health "$(realpath -e -- "$release")"; then
   echo 'FieldLedger did not become healthy. Check journalctl -u fieldledger.service.' >&2
   exit 1
 fi

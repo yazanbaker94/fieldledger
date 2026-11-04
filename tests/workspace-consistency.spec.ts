@@ -143,3 +143,156 @@ test('workspace rate limit preserves the server explanation and waits to enable 
   await button(page, 'Try again').click()
   await expect(button(page, 'Submit timecard')).toBeVisible()
 })
+
+test('a saved submission stays visible and blocks a second write after its refresh fails', async ({ page, context }) => {
+  await page.goto('/#worker')
+  const submit = button(page, 'Submit timecard')
+  await expect(submit).toBeEnabled()
+  await page.route('**/api/workspace', (route) => route.fulfill({ status: 503, json: { message: 'Unavailable' } }), { times: 1 })
+  await submit.click()
+  await expect(page.getByText('Timecard submitted for review.')).toBeVisible()
+  const list = page.getByRole('region', { name: 'My timecards' })
+  await expect(list.getByText('Pending', { exact: true })).toHaveCount(1)
+  await expect(submit).toBeDisabled()
+  await expect(page.getByText('Refresh before making another change.')).toBeVisible()
+  const data = await (await context.request.get('/api/workspace')).json()
+  expect(data.project.pendingCents).toBe(40_000)
+
+  await button(page, 'Refresh workspace').press('Enter')
+  await expect(submit).toBeEnabled()
+  await expect(page.locator('#main-content')).toBeFocused()
+  await expect(list.getByText('Pending', { exact: true })).toHaveCount(1)
+})
+
+test('a held verification snapshot stays retired while another tab resets', async ({ page, context }) => {
+  await page.goto('/#worker')
+  await expect(button(page, 'Submit timecard')).toBeEnabled()
+  const other = await context.newPage()
+  await other.goto('/#manager')
+  await expect(other.locator('#approved-total')).toHaveText('$9,700')
+
+  let finishSnapshot = () => {}
+  let snapshotReady = () => {}
+  let finishReset = () => {}
+  let resetReady = () => {}
+  const snapshot = new Promise<void>((resolve) => { snapshotReady = resolve })
+  const heldSnapshot = new Promise<void>((resolve) => { finishSnapshot = resolve })
+  const resetStarted = new Promise<void>((resolve) => { resetReady = resolve })
+  const heldReset = new Promise<void>((resolve) => { finishReset = resolve })
+  let submitted = false
+  await page.route('**/api/timecards', (route) => {
+    submitted = true
+    return route.continue()
+  }, { times: 1 })
+  await page.route('**/api/workspace', async (route) => {
+    if (!submitted) return route.continue()
+    submitted = false
+    const response = await route.fetch()
+    expect((await response.json()).project.pendingCents).toBe(16_050)
+    snapshotReady()
+    await heldSnapshot
+    await route.fulfill({ response })
+  })
+  await other.route('**/api/reset', async (route) => {
+    resetReady()
+    await heldReset
+    await route.continue()
+  }, { times: 1 })
+
+  await page.getByLabel('Hours worked').fill('3.21')
+  await button(page, 'Submit timecard').click()
+  try {
+    await snapshot
+    await button(other, 'Reset demo').click()
+    await button(other, 'Reset workspace').click()
+    await resetStarted
+    finishSnapshot()
+    await expect(page.getByRole('alert')).toContainText('Another tab is resetting this workspace.')
+    await expect(button(page, 'Go to foreman')).toHaveCount(0)
+    await expect(button(page, 'Submit timecard')).toBeDisabled()
+  } finally {
+    finishSnapshot()
+    finishReset()
+  }
+  await expect(other.getByText('A fresh workspace is ready.')).toBeVisible()
+  await expect(button(page, 'Submit timecard')).toBeEnabled()
+  await page.getByRole('navigation', { name: 'Demo role' }).getByRole('link', { name: 'Foreman', exact: true }).click()
+  await expect(button(page, 'Approve timecard')).toHaveCount(0)
+  await expect(page.getByText('3.21 hrs', { exact: true })).toHaveCount(0)
+})
+
+test('a reset from a client without tab signaling still invalidates an old snapshot', async ({ page, context }) => {
+  await page.goto('/#worker')
+  await expect(button(page, 'Submit timecard')).toBeEnabled()
+  const original = await (await context.request.get('/api/workspace')).json()
+
+  let release = () => {}
+  let captured = () => {}
+  const held = new Promise<void>((resolve) => { release = resolve })
+  const snapshot = new Promise<void>((resolve) => { captured = resolve })
+  await page.route('**/api/workspace', async (route) => {
+    const response = await route.fetch()
+    expect((await response.json()).project.pendingCents).toBe(40_000)
+    captured()
+    await held
+    await route.fulfill({ response })
+  }, { times: 1 })
+  await button(page, 'Submit timecard').click()
+  try {
+    await snapshot
+    const reset = await context.request.post('/api/reset', { headers: { 'X-Demo-Workspace': original.workspaceId }, data: {} })
+    expect(reset.ok()).toBe(true)
+    expect((await reset.json()).workspaceId).not.toBe(original.workspaceId)
+  } finally {
+    release()
+  }
+
+  await expect(page.getByRole('alert')).toContainText('The demo workspace changed.')
+  await expect(button(page, 'Go to foreman')).toHaveCount(0)
+  await expect(button(page, 'Submit timecard')).toBeEnabled()
+  await expect(page.getByRole('region', { name: 'My timecards' }).getByText('Pending', { exact: true })).toHaveCount(0)
+})
+
+test('entering Manager verifies cached costs before labeling them live', async ({ page, context }) => {
+  await page.goto('/#worker')
+  await submit(page, '8')
+  await button(page, 'Go to foreman').click()
+  const other = await context.newPage()
+  await other.goto(page.url())
+  let start = () => {}
+  let approveReady = () => {}
+  const approval = new Promise<void>((resolve) => { approveReady = resolve })
+  const heldApproval = new Promise<void>((resolve) => { start = resolve })
+  await other.route('**/api/timecards/*/decision', async (route) => {
+    approveReady()
+    await heldApproval
+    await route.continue()
+  }, { times: 1 })
+  await button(other, 'Approve timecard').click()
+  try {
+    await approval
+    await page.getByRole('navigation', { name: 'Demo role' }).getByRole('link', { name: 'Worker', exact: true }).click()
+    const refreshed = page.waitForResponse((response) => response.url().endsWith('/api/workspace') && response.ok())
+    await refocus(page)
+    expect((await (await refreshed).json()).project.approvedCents).toBe(970_000)
+  } finally {
+    start()
+  }
+  await expect(button(other, 'Go to manager')).toBeVisible()
+
+  let release = () => {}
+  const heldRefresh = new Promise<void>((resolve) => { release = resolve })
+  await page.route('**/api/workspace', async (route) => {
+    await heldRefresh
+    await route.continue()
+  }, { times: 1 })
+  await page.getByRole('navigation', { name: 'Demo role' }).getByRole('link', { name: 'Manager', exact: true }).click()
+  try {
+    await expect(page.getByText('Last saved project costs')).toBeVisible()
+    await expect(page.locator('#approved-total')).toHaveText('$9,700')
+  } finally {
+    release()
+  }
+  await expect(page.locator('#approved-total')).toHaveText('$10,100')
+  await expect(page.getByText('Live project costs')).toBeVisible()
+})

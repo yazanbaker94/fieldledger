@@ -236,13 +236,11 @@ async function isSubmissionDiscarded(client: PoolClient, session: string, worksp
 export function reconcileSubmission(pool: Pool, session: string, workspace: string, fixtures: Fixtures, requestId: string) {
   return transaction(pool, async (client) => {
     await lockWorkspace(client, session, workspace, fixtures.project.id);
-    const existing = await lookupSubmission(client, session, workspace, requestId);
-    if (!existing) {
-      if (await isSubmissionDiscarded(client, session, workspace, requestId)) {
-        throw new ApiError(410, 'This unsaved submission was discarded.', 'submission_discarded');
-      }
-      throw new ApiError(404, 'This submission has not been recorded.');
+    if (await isSubmissionDiscarded(client, session, workspace, requestId)) {
+      throw new ApiError(410, 'This unsaved submission was discarded.', 'submission_discarded');
     }
+    const existing = await lookupSubmission(client, session, workspace, requestId);
+    if (!existing) throw new ApiError(404, 'This submission has not been recorded.');
     return { ...await writtenWorkspace(client, session, fixtures), affectedCardId: existing.id };
   });
 }
@@ -251,20 +249,19 @@ export function discardSubmission(pool: Pool, session: string, workspace: string
   return transaction(pool, async (client) => {
     await lockWorkspace(client, session, workspace, fixtures.project.id);
     await verifyAssignment(client, fixtures.project.id, fixtures.worker.id, 'worker');
+    if (await isSubmissionDiscarded(client, session, workspace, requestId)) return writtenWorkspace(client, session, fixtures);
     const existing = await lookupSubmission(client, session, workspace, requestId);
     if (existing) {
       if (existing.kind !== 'submission') throw new ApiError(409, 'This request ID belongs to a timecard correction.');
       return { ...await writtenWorkspace(client, session, fixtures), affectedCardId: existing.id };
     }
-    if (!await isSubmissionDiscarded(client, session, workspace, requestId)) {
-      const inserted = await client.query(`
-        INSERT INTO discarded_timecard_submissions (session_id, workspace_id, request_id)
-        SELECT $1, $2, $3 WHERE (
-          SELECT count(*) FROM discarded_timecard_submissions WHERE session_id = $1 AND workspace_id = $2
-        ) < $4
-      `, [session, workspace, requestId, MAX_DISCARDS]);
-      if (inserted.rowCount !== 1) throw new ApiError(409, 'This session has reached its discard limit. Reset the demo to start again.');
-    }
+    const inserted = await client.query(`
+      INSERT INTO discarded_timecard_submissions (session_id, workspace_id, request_id)
+      SELECT $1, $2, $3 WHERE (
+        SELECT count(*) FROM discarded_timecard_submissions WHERE session_id = $1 AND workspace_id = $2
+      ) < $4
+    `, [session, workspace, requestId, MAX_DISCARDS]);
+    if (inserted.rowCount !== 1) throw new ApiError(409, 'This session has reached its discard limit. Reset the demo to start again.');
     return writtenWorkspace(client, session, fixtures);
   });
 }
@@ -273,6 +270,9 @@ export function submitCard(pool: Pool, session: string, workspace: string, fixtu
   const { project, worker } = fixtures;
   return mutate(pool, session, workspace, fixtures, async (client) => {
     await verifyAssignment(client, project.id, worker.id, 'worker');
+    if (await isSubmissionDiscarded(client, session, workspace, input.requestId)) {
+      throw new ApiError(409, 'This unsaved submission was discarded.', 'submission_discarded');
+    }
     const digest = createHash('sha256').update(JSON.stringify([input.workDate, input.hours])).digest('hex');
     const existing = await lookupSubmission(client, session, workspace, input.requestId);
     if (existing) {
@@ -280,9 +280,6 @@ export function submitCard(pool: Pool, session: string, workspace: string, fixtu
         throw new ApiError(409, 'This request ID is already used by a different timecard submission.');
       }
       return existing.id;
-    }
-    if (await isSubmissionDiscarded(client, session, workspace, input.requestId)) {
-      throw new ApiError(409, 'This unsaved submission was discarded.', 'submission_discarded');
     }
     const count = await client.query<{ count: number }>('SELECT count(*)::integer FROM timecards WHERE session_id = $1', [session]);
     if (count.rows[0].count >= MAX_CARDS) throw new ApiError(409, 'This session is full. Reset the demo to start again.');
@@ -316,6 +313,9 @@ export function resubmitCard(pool: Pool, session: string, workspace: string, fix
     if (card.worker_id !== worker.id) throw new ApiError(403, 'Only the assigned worker can resubmit this timecard.');
     const digest = input.requestId && createHash('sha256').update(JSON.stringify([id, input.version, input.workDate, input.hours])).digest('hex');
     if (input.requestId) {
+      if (await isSubmissionDiscarded(client, session, workspace, input.requestId)) {
+        throw new ApiError(409, 'This unsaved submission was discarded.', 'submission_discarded');
+      }
       const existing = await lookupSubmission(client, session, workspace, input.requestId);
       if (existing) {
         if (existing.kind !== 'correction' || existing.id !== id || existing.request_digest !== digest) {
@@ -357,6 +357,17 @@ export function decideCard(pool: Pool, session: string, workspace: string, fixtu
     const status = input.decision === 'approve' ? 'approved' : 'returned';
     const reason = input.decision === 'return' ? input.reason : null;
     if (card.version === input.version + 1 && card.status === status && card.decision_by === foreman.id && card.reason === reason) return id;
+    if (card.version > input.version + 1) {
+      // Only a complete, ordered audit can prove which action produced an earlier revision.
+      const recorded = await client.query(`
+        SELECT 1 FROM (
+          SELECT action, actor_id, note, row_number() OVER (ORDER BY id) AS revision, count(*) OVER () AS total
+          FROM audit_events WHERE timecard_id = $1
+        ) history
+        WHERE revision = $2 AND total = $3 AND action = $4 AND actor_id = $5 AND note IS NOT DISTINCT FROM $6::text
+      `, [id, input.version + 1, card.version, status, foreman.id, reason]);
+      if (recorded.rowCount === 1) return id;
+    }
     if (card.version !== input.version || card.status !== 'pending') throw new ApiError(409, 'This timecard has changed. Refresh before making a decision.');
     if (status === 'returned' && card.version > MAX_RETURN_VERSION) {
       throw new ApiError(409, 'This timecard has reached its correction limit and can only be approved.');

@@ -189,7 +189,12 @@ export function createApp(pool: Pool, fixtures: Fixtures, options: Options = {})
   });
 
   api.post('/reset', async (req, res) => {
-    const workspace = await resetWorkspace(pool, requireSession(req), requireWorkspace(req), fixtures);
+    const session = requireSession(req);
+    const retiringId = requireWorkspace(req);
+    const workspace = await resetWorkspace(pool, session, retiringId, fixtures);
+    // Set a browser-wide fence even when an older open bundle made the request.
+    const marker = `${options.secureCookies ? '__Host-' : ''}fieldledger-retired-${retiringId}`;
+    res.cookie(marker, '1', { sameSite: 'lax', secure: options.secureCookies, path: '/', maxAge: 120_000 });
     res.json(workspace);
   });
 

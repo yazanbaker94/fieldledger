@@ -13,6 +13,8 @@ services:
       DATABASE_URL: postgres://fieldledger:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/fieldledger
     ports:
       - '127.0.0.1:${APP_PORT:-3088}:3000'
+    volumes:
+      - app-assets:/app/asset-cache
     networks:
       - edge
       - data
@@ -69,4 +71,5 @@ networks:
     internal: true
 
 volumes:
+  app-assets: {}
   pgdata: {}

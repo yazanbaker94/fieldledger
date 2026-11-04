@@ -92,3 +92,80 @@ test("a stale return draft focuses the review action on cancel and rejects invis
   await expect(button(page, "Review latest timecard")).toBeFocused();
   await expect(button(page, "Approve timecard")).toBeDisabled();
 });
+
+test("role and home links preserve modified clicks", async ({ page, context }) => {
+  await page.goto("/#worker");
+  await expect(button(page, "Submit timecard")).toBeVisible();
+
+  const foremanTab = context.waitForEvent("page");
+  await page.getByRole("link", { name: "Foreman" }).click({ modifiers: ["ControlOrMeta"] });
+  const foreman = await foremanTab;
+  await expect(foreman.getByRole("heading", { name: "Review timecards" })).toBeVisible();
+  await expect(page).toHaveURL(/#worker$/);
+
+  const homeTab = context.waitForEvent("page");
+  await foreman.getByRole("link", { name: /^FieldLedger/ }).click({ modifiers: ["ControlOrMeta"] });
+  const home = await homeTab;
+  await expect(button(home, "Try the demo")).toBeVisible();
+  await expect(foreman).toHaveURL(/#foreman$/);
+
+  const shiftClickAllowed = await page.getByRole("link", { name: "Demo overview" }).evaluate((link) =>
+    link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, shiftKey: true })));
+  expect(shiftClickAllowed).toBe(true);
+});
+
+test("the full workflow reflows at 320px with 200% text", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 750 });
+  await page.goto("/");
+  await page.evaluate(() => {
+    document.documentElement.style.fontSize = "200%";
+    document.documentElement.style.fontFamily = "Verdana, 'DejaVu Sans', sans-serif";
+  });
+
+  async function expectTextToFit(selector: string) {
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBe(320);
+    const title = page.locator(selector).first();
+    await expect(title).toBeVisible();
+    expect(await title.evaluate((element) => {
+      const bounds = element.getBoundingClientRect();
+      const range = document.createRange();
+      range.selectNodeContents(element);
+      return Array.from(range.getClientRects()).every((line) => line.left >= bounds.left - 1 && line.right <= bounds.right + 1);
+    })).toBe(true);
+  }
+
+  async function expectReadableDate() {
+    await expectTextToFit(".card-row-title strong");
+    const dateLines = await page.locator(".card-row-title strong").first().evaluate((element) => {
+      const range = document.createRange();
+      range.selectNodeContents(element);
+      return range.getClientRects().length;
+    });
+    expect(dateLines).toBeLessThanOrEqual(3);
+  }
+
+  await expectTextToFit(".hero h1");
+  expect(await page.locator(".hero-copy").evaluate((copy) =>
+    copy.getBoundingClientRect().right <= copy.parentElement!.getBoundingClientRect().right)).toBe(true);
+  expect(await page.locator(".hero-image figcaption").evaluate((caption) =>
+    caption.getBoundingClientRect().top >= caption.parentElement!.getBoundingClientRect().top)).toBe(true);
+  await button(page, "Try the demo").click();
+  await expectTextToFit(".workspace-heading h1");
+  await expectReadableDate();
+  await submit(page, "7");
+  await button(page, "Go to foreman").click();
+  await expectTextToFit(".workspace-heading h1");
+  await expectReadableDate();
+  await button(page, "Return with a note").click();
+  await page.getByLabel("Correction note").fill("Please confirm the final hour.");
+  await button(page, "Send back to worker").click();
+  await button(page, "Go to worker").click();
+  await expectTextToFit(".workspace-heading h1");
+  await page.getByLabel("Hours worked").fill("8");
+  await button(page, "Resubmit timecard").click();
+  await button(page, "Go to foreman").click();
+  await button(page, "Approve timecard").click();
+  await button(page, "Go to manager").click();
+  await expectTextToFit(".workspace-heading h1");
+  await expect(page.locator("#approved-total")).toHaveText("$10,100");
+});

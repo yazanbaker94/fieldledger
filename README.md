@@ -68,7 +68,13 @@ npm run test:browser
 npm run screenshots
 ```
 
-The browser suite drives the built app through the same roles a visitor sees. Set `FIELDLEDGER_TEST_URL` to verify a deployed instance over HTTPS. The screenshot command captures the live worker, foreman, and manager views.
+The full browser suite creates more fresh workspaces than the public per-IP limit allows. Run the full suite against a local test database. For a deployed HTTPS smoke check, use the single workflow that opens two demo workspaces.
+
+```sh
+FIELDLEDGER_TEST_URL=https://fieldledger.swoop.video npm run test:browser -- --grep 'screenshots and persistent budget changes'
+```
+
+The screenshot command captures the worker, foreman, and manager views from a running app.
 
 The [VPS deployment guide](deploy/README.md) covers the PostgreSQL volume, origin health checks, and Cloudflare routing.
 

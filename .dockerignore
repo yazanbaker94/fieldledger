@@ -8,5 +8,6 @@ coverage
 playwright-report
 test-results
 docs
-deploy
+deploy/*
+!deploy/compose-entrypoint.sh
 *.log

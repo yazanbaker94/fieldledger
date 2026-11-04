@@ -102,7 +102,7 @@ async function recoverWrite(write: () => Promise<Workspace>, matches: (workspace
   try {
     return await write()
   } catch (error) {
-    if (error instanceof ApiError && error.status < 500 && error.status !== 408) throw error
+    if (error instanceof ApiError && error.status < 500 && error.status !== 408 && !(cardId && error.status === 409 && !error.code)) throw error
     const workspace = await request('/workspace', { timeout: 5000 }).catch(() => null)
     if (workspace && matches(workspace)) return { ...workspace, affectedCardId: cardId }
     throw error

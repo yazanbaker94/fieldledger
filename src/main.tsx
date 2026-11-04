@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type MouseEvent } from 'react'
 import { createRoot } from 'react-dom/client'
 import {
   ArrowDownRight, ArrowRight, ArrowUpRight, ChartNoAxesCombined, Check, ClipboardCheck,
@@ -6,6 +6,7 @@ import {
 } from 'lucide-react'
 import { api, ApiError, type Role, type Workspace } from './api'
 import { selectRetryWorkspace } from './submission-retries'
+import { beginWorkspaceReset, onWorkspaceTransition, retireWorkspace, workspaceTransition } from './workspace-sync'
 import { ForemanView, ManagerView, WorkerView, type RunMutation } from './workspace'
 import './styles.css'
 
@@ -58,9 +59,15 @@ async function openWorkspace() {
   }
 }
 
+function followDemoLink(event: MouseEvent<HTMLAnchorElement>, navigate: () => void) {
+  if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return
+  event.preventDefault()
+  navigate()
+}
+
 function Brand({ onHome }: { onHome: () => void }) {
   return (
-    <a className="brand" href="#welcome" onClick={(event) => { event.preventDefault(); onHome() }}>
+    <a className="brand" href="#welcome" onClick={(event) => followDemoLink(event, onHome)}>
       <span className="brand-mark"><Layers3 size={23} strokeWidth={2.3} /></span>
       <span>FieldLedger<small>Field operations</small></span>
     </a>
@@ -134,6 +141,9 @@ function App() {
   const [loading, setLoading] = useState(false)
   const [loadError, setLoadError] = useState<LoadError | null>(null)
   const [refreshError, setRefreshError] = useState(false)
+  const [writeRefreshRequired, setWriteRefreshRequired] = useState(false)
+  const [managerFresh, setManagerFresh] = useState(false)
+  const [transition, setTransition] = useState<ReturnType<typeof workspaceTransition>>(null)
   const [lastSynced, setLastSynced] = useState<Date | null>(null)
   const [busy, setBusy] = useState(false)
   const [mutationError, setMutationError] = useState('')
@@ -148,15 +158,23 @@ function App() {
   const feedback = useRef<HTMLDivElement>(null)
   const resetTrigger = useRef<HTMLButtonElement>(null)
   const resetFocusRoute = useRef<string | null>(null)
+  const routeView = useRef(view)
+  const previousView = useRef<View>('welcome')
+
+  const navigate = useCallback((route: Route) => {
+    if (route.view !== routeView.current) setManagerFresh(false)
+    routeView.current = route.view
+    setRoute(route)
+  }, [])
 
   const go = useCallback((target: View, targetCardId?: string) => {
-    setRoute(writeRoute(target, targetCardId ?? null))
+    navigate(writeRoute(target, targetCardId ?? null))
     setResetTarget(null)
     setNotice(null)
     setMutationError('')
     window.scrollTo(0, 0)
     requestAnimationFrame(() => main.current?.focus({ preventScroll: true }))
-  }, [])
+  }, [navigate])
 
   const selectCard = useCallback((id: string, replace = false) => {
     if (view !== 'foreman' && view !== 'manager') return
@@ -169,7 +187,7 @@ function App() {
 
   useEffect(() => {
     const syncRoute = () => {
-      setRoute(readRoute())
+      navigate(readRoute())
       setResetTarget(null)
       setNotice(null)
       setMutationError('')
@@ -180,14 +198,19 @@ function App() {
       window.removeEventListener('hashchange', syncRoute)
       window.removeEventListener('popstate', syncRoute)
     }
-  }, [])
+  }, [navigate])
 
   const applyWorkspace = useCallback((data: Workspace) => {
+    const previousId = workspaceRef.current?.workspaceId
+    if (previousId && previousId !== data.workspaceId) retireWorkspace(previousId)
     selectRetryWorkspace(data.workspaceId)
     workspaceRef.current = data
     setWorkspace(data)
     setLastSynced(new Date())
     setRefreshError(false)
+    setWriteRefreshRequired(false)
+    setTransition(workspaceTransition(data.workspaceId))
+    if (routeView.current === 'manager') setManagerFresh(true)
   }, [])
 
   const loadWorkspace = useCallback(async (showLoading = true) => {
@@ -200,8 +223,10 @@ function App() {
       setLoadError(null)
     }
     try {
-      const data = await (isInitialLoad ? openWorkspace() : api.workspace())
+      let data = await (isInitialLoad ? openWorkspace() : api.workspace())
+      if (version === fetchVersion.current && workspaceTransition(data.workspaceId) === 'retired') data = await api.workspace()
       if (version !== fetchVersion.current) return
+      if (workspaceTransition(data.workspaceId) === 'retired') throw new Error('The workspace snapshot is retired.')
       applyWorkspace(data)
       return data
     } catch (error) {
@@ -230,8 +255,28 @@ function App() {
 
   const inWorkspace = view !== 'welcome'
   useEffect(() => {
-    if (inWorkspace) void loadWorkspace(!workspaceRef.current)
-  }, [inWorkspace, loadWorkspace])
+    const from = previousView.current
+    previousView.current = view
+    if (view !== 'welcome' && (!workspaceRef.current || from === 'welcome' || view === 'manager')) void loadWorkspace(!workspaceRef.current)
+  }, [view, loadWorkspace])
+
+  useEffect(() => onWorkspaceTransition((id) => {
+    if (id !== workspaceRef.current?.workspaceId) return
+    const status = workspaceTransition(id)
+    setTransition(status)
+    if (status) {
+      fetchVersion.current += 1
+      setLoading(false)
+      setNotice(null)
+    }
+    if (status !== 'resetting') void loadWorkspace(false)
+  }), [loadWorkspace])
+
+  useEffect(() => {
+    if (transition !== 'resetting') return
+    const timer = window.setTimeout(() => void loadWorkspace(false), 30_000)
+    return () => window.clearTimeout(timer)
+  }, [transition, loadWorkspace])
 
   useEffect(() => {
     if (!inWorkspace) return
@@ -269,6 +314,10 @@ function App() {
     if (writing.current) return false
     const startingHash = window.location.hash
     const startingWorkspaceId = workspaceRef.current?.workspaceId
+    if (writeRefreshRequired || (startingWorkspaceId && workspaceTransition(startingWorkspaceId))) {
+      void loadWorkspace(false)
+      return false
+    }
     writing.current = true
     fetchVersion.current += 1
     setLoading(false)
@@ -288,19 +337,30 @@ function App() {
         setMutationError('The demo workspace changed. You’re now viewing the current workspace.')
         return false
       }
-      if (!latest) {
-        setRefreshError(true)
-        if (window.location.hash === startingHash) setNotice({ message: 'The change was saved. Refresh the workspace to see its current state.' })
-        return true
+      const snapshot = latest ?? data
+      const status = workspaceTransition(snapshot.workspaceId)
+      if (status) {
+        if (displayedId === snapshot.workspaceId) setTransition(status)
+        if (status === 'retired') {
+          setMutationError('The demo workspace changed. You’re now viewing the current workspace.')
+          void loadWorkspace(false)
+        } else {
+          setMutationError('Another tab is resetting this workspace. Check the current timecard list when the reset finishes.')
+        }
+        return false
       }
       fetchVersion.current += 1
-      applyWorkspace(latest)
-      if (latest.workspaceId !== data.workspaceId) {
+      applyWorkspace(snapshot)
+      if (!latest) {
+        setRefreshError(true)
+        setWriteRefreshRequired(true)
+      }
+      if (snapshot.workspaceId !== data.workspaceId) {
         setMutationError('The demo workspace changed. You’re now viewing the current workspace.')
         return false
       }
-      const feedback = typeof message === 'function' ? message(data) : { message, next }
-      if (window.location.hash === startingHash) setNotice({ ...feedback, cardId: data.affectedCardId })
+      const result = typeof message === 'function' ? message(data) : { message, next }
+      setNotice(window.location.hash === startingHash ? { ...result, cardId: data.affectedCardId } : { message: result.message })
       return true
     } catch (error) {
       setMutationError(error instanceof ApiError ? error.message : 'The request didn’t finish. Try again.')
@@ -317,7 +377,7 @@ function App() {
       writing.current = false
       setBusy(false)
     }
-  }, [applyWorkspace, loadWorkspace])
+  }, [applyWorkspace, loadWorkspace, writeRefreshRequired])
 
   async function reset() {
     if (!resetTarget) return
@@ -328,7 +388,16 @@ function App() {
     }
     resetFocusRoute.current = window.location.hash
     setResetTarget(null)
-    await mutate(() => api.reset(resetTarget), 'A fresh workspace is ready.')
+    await mutate(async () => {
+      const release = beginWorkspaceReset(resetTarget)
+      try {
+        const data = await api.reset(resetTarget)
+        if (data.workspaceId !== resetTarget) retireWorkspace(resetTarget)
+        return data
+      } finally {
+        release()
+      }
+    }, 'A fresh workspace is ready.')
   }
 
   function closeReset() {
@@ -336,8 +405,17 @@ function App() {
     requestAnimationFrame(() => resetTrigger.current?.focus())
   }
 
-  const pendingCount = workspace?.timecards.filter((card) => card.status === 'pending').length ?? 0
+  async function refreshWorkspace(button: HTMLButtonElement) {
+    const wasFocused = document.activeElement === button
+    if (await loadWorkspace() && wasFocused && (document.activeElement === document.body || document.activeElement === button)) {
+      main.current?.focus({ preventScroll: true })
+    }
+  }
+
   const roleKey = `${workspace?.workspaceId ?? ''}:${cardId ?? ''}`
+  const writesBlocked = writeRefreshRequired || transition !== null
+  const visibleWorkspace = transition === 'retired' ? null : workspace
+  const pendingCount = visibleWorkspace?.timecards.filter((card) => card.status === 'pending').length ?? 0
 
   return (
     <>
@@ -354,13 +432,13 @@ function App() {
             <div className="workspace-bar">
               <nav className="role-nav" aria-label="Demo role">
                 {roles.map(({ id, label, icon: Icon }) => (
-                  <a key={id} href={`#${id}`} aria-current={view === id ? 'page' : undefined} onClick={(event) => { event.preventDefault(); go(id) }}>
+                  <a key={id} href={`#${id}`} aria-current={view === id ? 'page' : undefined} onClick={(event) => followDemoLink(event, () => go(id))}>
                     <Icon size={17} aria-hidden="true" /> {label}
                     {id === 'foreman' && pendingCount > 0 && <span className="role-count" aria-label={`${pendingCount} awaiting review`}>{pendingCount}</span>}
                   </a>
                 ))}
               </nav>
-              <button ref={resetTrigger} className="reset-button" type="button" onClick={() => workspace && setResetTarget(workspace.workspaceId)} disabled={busy || !workspace}>
+              <button ref={resetTrigger} className="reset-button" type="button" onClick={() => workspace && setResetTarget(workspace.workspaceId)} disabled={busy || writesBlocked || !workspace}>
                 <RotateCcw size={15} /> <span>Reset demo</span>
               </button>
             </div>
@@ -368,14 +446,20 @@ function App() {
               <div className="notice" role="status" ref={feedback}>
                 <Check size={19} /> <span>{notice.message}</span>
                 {notice.next && <button type="button" data-handoff onClick={() => go(notice.next!, notice.cardId)}>Go to {notice.next} <ArrowRight size={15} /></button>}
-                <button className="dismiss-notice" type="button" aria-label="Dismiss update" onClick={() => setNotice(null)}><X size={16} /></button>
+                <button className="dismiss-notice" type="button" aria-label="Dismiss update" onClick={(event) => {
+                  if (document.activeElement === event.currentTarget) main.current?.focus({ preventScroll: true })
+                  setNotice(null)
+                }}><X size={16} /></button>
               </div>
             )}
             {mutationError && <div className="error-message" role="alert" ref={feedback}>{mutationError}</div>}
             {refreshError && lastSynced && <div className="error-message workspace-refresh" role="status">
               <span>Couldn’t refresh the workspace. Showing data last synced at <time dateTime={lastSynced.toISOString()}>{syncTime.format(lastSynced)}</time>.</span>
-              <button className="text-button" type="button" onClick={() => void loadWorkspace()} disabled={busy || loading}>Refresh workspace <RotateCcw size={15} /></button>
+              {writeRefreshRequired && <span>Refresh before making another change.</span>}
+              <button className="text-button" type="button" onClick={(event) => void refreshWorkspace(event.currentTarget)} disabled={busy || loading}>Refresh workspace <RotateCcw size={15} /></button>
             </div>}
+            {transition === 'resetting' && <p className="panel workspace-loading" role="status">Another tab is resetting this workspace…</p>}
+            {transition === 'retired' && !refreshError && <p className="panel workspace-loading" role="status">Opening the current demo workspace…</p>}
             {!workspace && (loadError ? (
               <section className="panel workspace-loading">
                 <h1>Workspace unavailable</h1><p role="alert">{loadError.message}</p>
@@ -383,9 +467,9 @@ function App() {
                 <button className="button button-primary" type="button" onClick={() => void loadWorkspace()} disabled={loading || Boolean(loadError.retryAt)}>Try again <RotateCcw size={16} /></button>
               </section>
             ) : <p className="panel workspace-loading" role="status">Opening your workspace…</p>)}
-            {workspace && view === 'worker' && <WorkerView key={roleKey} cardId={cardId} data={workspace} busy={busy} run={mutate} go={go} />}
-            {workspace && view === 'foreman' && <ForemanView key={workspace.workspaceId} cardId={cardId} data={workspace} busy={busy} run={mutate} go={go} onSelectCard={selectCard} />}
-            {workspace && view === 'manager' && <ManagerView key={workspace.workspaceId} cardId={cardId} data={workspace} onSelectCard={selectCard} costsStale={refreshError} />}
+            {visibleWorkspace && view === 'worker' && <WorkerView key={roleKey} cardId={cardId} data={visibleWorkspace} busy={busy} writesBlocked={writesBlocked} run={mutate} go={go} />}
+            {visibleWorkspace && view === 'foreman' && <ForemanView key={visibleWorkspace.workspaceId} cardId={cardId} data={visibleWorkspace} busy={busy} writesBlocked={writesBlocked} run={mutate} go={go} onSelectCard={selectCard} />}
+            {visibleWorkspace && view === 'manager' && <ManagerView key={visibleWorkspace.workspaceId} cardId={cardId} data={visibleWorkspace} onSelectCard={selectCard} costsStale={refreshError || !managerFresh || busy || transition !== null} />}
             {resetTarget && <ResetDialog busy={busy} onClose={closeReset} onReset={reset} />}
           </div>
         )}
@@ -394,7 +478,7 @@ function App() {
         <div className="page-shell footer-inner">
           <span><Layers3 size={16} /> FieldLedger</span>
           <span>Independent portfolio project · Fictional project data</span>
-          {inWorkspace && <a href="#welcome" onClick={(event) => { event.preventDefault(); go('welcome') }}>Demo overview <ArrowUpRight size={14} /></a>}
+          {inWorkspace && <a href="#welcome" onClick={(event) => followDemoLink(event, () => go('welcome'))}>Demo overview <ArrowUpRight size={14} /></a>}
         </div>
       </footer>
     </>
