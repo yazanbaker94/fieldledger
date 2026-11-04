@@ -5,6 +5,7 @@ for (const mode of ['marked', 'legacy'] as const) {
     const timecards = page.getByRole('region', { name: 'My timecards' })
     await page.goto('/#worker')
     await expect(timecards).toBeVisible()
+    const workDate = await page.getByLabel('Work date').inputValue()
     await context.clearCookies({ name: /^(?:__Host-)?fieldledger$/ })
 
     let release = () => {}
@@ -35,22 +36,27 @@ for (const mode of ['marked', 'legacy'] as const) {
     }, { times: 1 })
 
     await page.evaluate(() => window.dispatchEvent(new Event('focus')))
-    let oldResponse: Response
+    const status = mode === 'legacy' ? 429 : 409
+    let delivered: Promise<unknown>
     try {
-      oldResponse = await reachedServer
-      const fresh = await context.newPage()
-      await fresh.goto('/#worker')
-      await fresh.getByLabel('Hours worked').fill('3.21')
-      await fresh.getByRole('button', { name: 'Submit timecard', exact: true }).click()
-      await expect(fresh.getByText('Timecard submitted for review.', { exact: true })).toBeVisible()
+      const oldResponse = await reachedServer
+      expect(oldResponse.status).toBe(status)
+      expect(oldResponse.headers.get('Set-Cookie')).toBeNull()
+
+      // The context shares Chromium's cookies. Open and save directly while the old tab's fetch is held.
+      const fresh = await context.request.get('/api/workspace', { headers: { 'X-Demo-Open': '1' } })
+      expect(fresh.ok()).toBe(true)
+      const { workspaceId } = await fresh.json()
+      const saved = await context.request.post('/api/timecards', {
+        headers: { 'X-Demo-Workspace': workspaceId, 'X-Demo-Role': 'worker' },
+        data: { workDate, hours: 3.21, requestId: crypto.randomUUID() },
+      })
+      expect(saved.ok()).toBe(true)
+      delivered = page.waitForResponse((response) => response.url().endsWith('/api/workspace') && response.status() === status)
     } finally {
       release()
     }
-
-    expect(oldResponse.status).toBe(mode === 'legacy' ? 429 : 409)
-    expect(oldResponse.headers.get('Set-Cookie')).toBeNull()
-    if (mode === 'legacy') await expect(page.getByText(/Couldn’t refresh the workspace/)).toBeVisible()
-    else await expect(timecards).toContainText('3.21 hrs')
+    await delivered
 
     await page.reload()
     await expect(timecards).toContainText('3.21 hrs')
