@@ -1,0 +1,26 @@
+[Unit]
+Description=FieldLedger timecard demo
+After=postgresql.service
+Requires=postgresql.service
+
+[Service]
+Type=simple
+User=fieldledger
+Group=fieldledger
+WorkingDirectory=/opt/fieldledger/current
+Environment=NODE_ENV=production
+Environment=APP_ORIGIN=https://fieldledger.swoop.video
+Environment=HOST=127.0.0.1
+Environment=PORT=3088
+Environment=TRUST_PROXY=1
+Environment="DATABASE_URL=postgresql:///fieldledger?host=/var/run/postgresql&user=fieldledger"
+ExecStart=/usr/bin/node --import tsx server/index.ts
+Restart=on-failure
+RestartSec=3s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

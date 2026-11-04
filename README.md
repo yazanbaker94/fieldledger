@@ -1,0 +1,78 @@
+# FieldLedger
+
+FieldLedger is a working construction timecard and labour-costing demo. It follows one timecard from a worker's phone through foreman review to the project manager's budget.
+
+[Open the live demo](https://fieldledger.swoop.video/) · [Watch the walkthrough](https://github.com/yazanbaker94/fieldledger/releases/tag/v1.0.0)
+
+## Try the workflow
+
+1. As **Worker**, submit a timecard for eight hours. The project is already assigned.
+2. As **Foreman**, open the pending card. Return it with a note if it needs a correction. Switch to Worker to correct and resubmit it, then approve it as Foreman.
+3. As **Manager**, open the cost breakdown. The eight hours add CAD $400 to the CAD $9,700 already approved. The project moves to CAD $10,100 against its CAD $10,000 labour budget. Open the approved card to see its review history.
+
+Each browser gets its own demo workspace backed by PostgreSQL. Refreshing the page preserves its data during the 24-hour session. The role switcher is intentionally available to demo visitors. **Reset demo** restores that browser's starting data. The contractor, workers, rates, and project data are fictional.
+
+## Screens from the running app
+
+| Worker on a phone | Foreman reviewing the card | Manager after approval |
+| --- | --- | --- |
+| [![Worker mobile timecard form](docs/screenshots/worker.png)](docs/screenshots/worker.png) | [![Foreman reviewing the submitted timecard](docs/screenshots/foreman.png)](docs/screenshots/foreman.png) | [![Manager viewing approved labour over budget](docs/screenshots/manager.png)](docs/screenshots/manager.png) |
+
+## Run locally
+
+Use Node.js 22.12 or newer and a dedicated PostgreSQL database. Copy `.env.example` to `.env` and set the connection string for that database.
+
+```sh
+npm ci
+npm run build
+npm start
+```
+
+Open [FieldLedger locally](http://localhost:3000). The server applies the schema and loads the fictional source data on startup.
+
+For UI development, run `npm run dev:api` and `npm run dev` in separate terminals. Vite proxies API requests to port 3000 by default.
+
+## How it works
+
+- React and TypeScript render the phone and desktop views. A TypeScript API checks input and enforces valid timecard transitions.
+- PostgreSQL stores source records, workspace state, timecards, and review events. Approval stores the applied labour rate and the exact cost, so changing a reference rate leaves earlier approvals historically accurate.
+- The budget view sums approved timecards in SQL. Pending labour is displayed separately. The approval, cost, and audit event commit in one transaction.
+- The prototype uses one assigned project and regular-time labour in Canadian dollars. Its budget comparison uses approved labour cost.
+
+### Foundry mapping
+
+FieldLedger is a standalone implementation inspired by the [Foundry Ontology](https://www.palantir.com/docs/foundry/ontology/overview). This design would map to Foundry as follows.
+
+| FieldLedger | Foundry equivalent |
+| --- | --- |
+| Validated fictional CSV inputs | Source datasets and a pipeline transform |
+| Workers, projects, and timecards | Object types connected by links |
+| Submit, return, resubmit, and approve commands | Governed Ontology Actions |
+| Role-specific forms, queue, and budget view | Workshop views or a custom OSDK app |
+
+## Verify
+
+Point `DATABASE_URL` to a disposable PostgreSQL database for integration and browser tests.
+
+```sh
+npm run build
+npm test
+npx playwright install chromium
+npm run test:browser
+npm run screenshots
+```
+
+The browser suite drives the built app through the same roles a visitor sees. Set `FIELDLEDGER_TEST_URL` to verify a deployed instance over HTTPS. The screenshot command captures the live worker, foreman, and manager views.
+
+The [VPS deployment guide](deploy/README.md) covers the PostgreSQL volume, origin health checks, and Cloudflare routing.
+
+### Welcome photo
+
+The fictional [Riverside Road Renewal photo](public/images/riverside-roadwork.webp) was created with the built-in ImageGen tool. The screenshots above were captured from the running app.
+
+<details>
+<summary>ImageGen prompt</summary>
+
+Use case: photorealistic-natural. Create the original banner photograph for a polished Ontario civil construction timecard web application. Wide landscape photograph composed for a crop about 16:9. A real-looking small road reconstruction project outside Ottawa in early autumn. One distant worker viewed from behind in a safety-orange high-visibility vest and hard hat and a yellow roadwork excavator farther along the half-graded road, with utility cones and gravel shoulder. Canadian mixed forest in the background. Keep the main action in the central/right two thirds, with naturally quiet gravel and sky on the left. Quiet early morning warm light, subtle slate-blue shadows, earthy beige and restrained orange, natural documentary editorial photography, crisp grounded detail, no glamor or dramatic effects. Worksite looks organized and equipment is safely distant from people. No text, logos, recognizable brands, watermarks, UI, graphics, or frame.
+
+</details>

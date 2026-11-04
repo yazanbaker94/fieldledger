@@ -1,0 +1,72 @@
+name: fieldledger
+
+services:
+  app:
+    build: .
+    init: true
+    restart: unless-stopped
+    environment:
+      APP_ORIGIN: ${APP_ORIGIN:-http://127.0.0.1:3088}
+      HOST: '0.0.0.0'
+      PORT: '3000'
+      TRUST_PROXY: ${TRUST_PROXY:-0}
+      DATABASE_URL: postgres://fieldledger:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/fieldledger
+    ports:
+      - '127.0.0.1:${APP_PORT:-3088}:3000'
+    networks:
+      - edge
+      - data
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'node', '-e', 'fetch("http://127.0.0.1:3000/api/health").then(response => { if (!response.ok) process.exit(1) }).catch(() => process.exit(1))']
+      interval: 15s
+      timeout: 5s
+      start_period: 20s
+      retries: 4
+    logging: &bounded-logs
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+
+  db:
+    image: postgres:18-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: fieldledger
+      POSTGRES_USER: fieldledger
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql
+    networks:
+      - data
+    healthcheck:
+      test: ['CMD', 'pg_isready', '-U', 'fieldledger', '-d', 'fieldledger', '-h', '127.0.0.1']
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    logging: *bounded-logs
+
+  tunnel:
+    image: cloudflare/cloudflared:2026.10.7
+    profiles: [tunnel]
+    restart: unless-stopped
+    command: [tunnel, --no-autoupdate, run]
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    networks:
+      - edge
+    depends_on:
+      app:
+        condition: service_healthy
+    logging: *bounded-logs
+
+networks:
+  edge: {}
+  data:
+    internal: true
+
+volumes:
+  pgdata: {}
