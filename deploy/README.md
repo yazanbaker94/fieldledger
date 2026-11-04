@@ -69,20 +69,23 @@ If you already have a Cloudflare connector or HTTPS reverse proxy running direct
 
 ### Updates and troubleshooting
 
-After pulling a reviewed revision, rerun `docker compose up -d --build --wait` with the same profile options. The `app-assets` volume keeps the previous distinct hashed bundle available through container replacement. Retain that volume across updates.
+After pulling a reviewed revision, rerun `docker compose up -d --build --wait` with the same profile options. The `app-assets` volume keeps hashed bundles from the last healthy release and the most recent replacement available through container updates. Retain that volume across updates.
 
 If the running container predates the asset cache, seed the volume once before replacing it. Run this from the updated checkout while the old app is still running.
 
 ```bash
-set -o pipefail
-docker compose build app
-docker compose exec -T app tar -C /app/dist -cf - assets |
-  docker compose run --rm --no-deps -T --entrypoint sh app -ec '
-    source_dir=$(mktemp -d)
-    tar -xf - -C "$source_dir"
-    FIELDLEDGER_ASSET_SOURCE="$source_dir/assets" sh /usr/local/bin/fieldledger-entrypoint true
-  '
-docker compose up -d --wait
+(
+  set -euo pipefail
+  docker compose build app
+  docker compose exec -T app tar -C /app/dist -cf - assets |
+    docker compose run --rm --no-deps -T --entrypoint sh app -ec '
+      source_dir=$(mktemp -d)
+      tar -xf - -C "$source_dir"
+      FIELDLEDGER_ASSET_SOURCE="$source_dir/assets" sh /usr/local/bin/fieldledger-entrypoint \
+        sh /usr/local/bin/fieldledger-entrypoint --mark-healthy
+    '
+  docker compose up -d --wait
+)
 ```
 
 Run `docker compose ps` and `docker compose logs --tail=100 app db` for health and startup diagnostics. The `pgdata` volume survives normal updates. Back it up before a database major-version upgrade.

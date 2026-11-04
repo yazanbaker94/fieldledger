@@ -199,6 +199,11 @@ if systemctl is-active --quiet fieldledger.service; then
     echo 'The running FieldLedger service has no recoverable release. Repair it before deploying.' >&2
     exit 1
   fi
+  running_pid=$(systemctl show -p MainPID --value fieldledger.service)
+  if [[ ! $running_pid =~ ^[1-9][0-9]*$ || $(sudo -n readlink -e -- "/proc/$running_pid/cwd") != "$previous_release" ]]; then
+    echo 'The running FieldLedger service is outside its current release. Repair it before deploying.' >&2
+    exit 1
+  fi
   was_active=1
 fi
 

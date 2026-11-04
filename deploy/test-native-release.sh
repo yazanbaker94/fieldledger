@@ -38,6 +38,10 @@ case ${0##*/} in
     ;;
   readlink)
     if [[ $* == '-e -- /proc/8472/cwd' ]]; then
+      if [[ $FAIL_PHASE == cwd ]]; then
+        printf '%s\n' "$TEST_STATE/stale-running-release"
+        exit 0
+      fi
       exec "$REAL_READLINK" -e -- "$TEST_APP/current"
     fi
     exec "$REAL_READLINK" "$@"
@@ -167,9 +171,10 @@ cmp "$repeat/dist/assets/index-second00.js" "$TEST_APP/current/previous-assets/i
 previous=$(readlink "$TEST_APP/current")
 printf '[Unit]\nDescription=previous\n' > "$TEST_UNIT"
 previous_failed=''
-for phase in validation restart listener origin page health; do
+for phase in validation cwd restart listener origin page health; do
   case $phase in
     validation) failed_asset=badbuild ;;
+    cwd) failed_asset=badcwd00 ;;
     restart) failed_asset=restart0 ;;
     listener) failed_asset=badpid00 ;;
     origin) failed_asset=badorig0 ;;
@@ -180,7 +185,7 @@ for phase in validation restart listener origin page health; do
   [[ $(readlink "$TEST_APP/current") == "$previous" ]]
   grep -q 'Description=previous' "$TEST_UNIT"
   cmp "$repeat/dist/assets/index-second00.js" "$TEST_APP/current/previous-assets/index-second00.js"
-  if [[ $phase == validation ]]; then
+  if [[ $phase == validation || $phase == cwd ]]; then
     [[ ! -e "$TEST_APP/current/previous-assets/index-$failed_asset.js" ]]
   else
     printf 'compiled %s\n' "$failed_asset" | cmp - "$TEST_APP/current/previous-assets/index-$failed_asset.js"

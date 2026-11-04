@@ -296,3 +296,70 @@ test('entering Manager verifies cached costs before labeling them live', async (
   await expect(page.locator('#approved-total')).toHaveText('$10,100')
   await expect(page.getByText('Live project costs')).toBeVisible()
 })
+
+for (const scenario of ['delayed verification', 'failed verification'] as const) {
+  test(`a ${scenario} cannot rewind newer Manager costs in the same workspace`, async ({ page, context }) => {
+    await page.goto('/#worker')
+    await submit(page, '8')
+    await submit(page, '5')
+    const original = await (await context.request.get('/api/workspace')).json()
+    const first = original.timecards.find((card: { status: string; hours: number }) => card.status === 'pending' && card.hours === 8)
+    const second = original.timecards.find((card: { status: string; hours: number }) => card.status === 'pending' && card.hours === 5)
+    await page.goto(`/#foreman?card=${first.id}`)
+    const other = await context.newPage()
+    await other.goto(`/#foreman?card=${second.id}`)
+    await expect(button(other, 'Approve timecard')).toBeEnabled()
+
+    let approved = false
+    let release = () => {}
+    let captured = () => {}
+    const held = new Promise<void>((resolve) => { release = resolve })
+    const snapshot = new Promise<void>((resolve) => { captured = resolve })
+    await page.route('**/api/timecards/*/decision', async (route) => {
+      const response = await route.fetch()
+      expect(response.ok()).toBe(true)
+      if (scenario === 'failed verification') {
+        expect((await response.json()).project.approvedCents).toBe(1_010_000)
+        captured()
+        await held
+      }
+      approved = true
+      await route.fulfill({ response })
+    }, { times: 1 })
+    await page.route('**/api/workspace', async (route) => {
+      if (!approved) return route.continue()
+      approved = false
+      if (scenario === 'failed verification') return route.fulfill({ status: 503, json: { message: 'Unavailable' } })
+      const response = await route.fetch()
+      const data = await response.json()
+      expect(data.workspaceId).toBe(original.workspaceId)
+      expect(data.project.approvedCents).toBe(1_010_000)
+      captured()
+      await held
+      await route.fulfill({ response })
+    })
+
+    const manager = page.getByRole('navigation', { name: 'Demo role' }).getByRole('link', { name: 'Manager', exact: true })
+    const approvedTotal = page.locator('#approved-total')
+    const approvedRow = page.locator(`[data-card-id="${second.id}"]`)
+    await button(page, 'Approve timecard').click()
+    try {
+      await snapshot
+      await button(other, 'Approve timecard').click()
+      await expect(button(other, 'Go to manager')).toBeVisible()
+      const current = await (await context.request.get('/api/workspace')).json()
+      expect(current.workspaceId).toBe(original.workspaceId)
+      expect(current.project.approvedCents).toBe(1_035_000)
+      await manager.click()
+      await expect(approvedTotal).toHaveText('$10,350')
+      await expect(approvedRow).toBeVisible()
+    } finally {
+      release()
+    }
+
+    await expect(page.locator('.workspace')).toHaveAttribute('aria-busy', 'false')
+    if (scenario === 'delayed verification') await expect(page.getByText('Live project costs')).toBeVisible()
+    await expect(approvedTotal).toHaveText('$10,350')
+    await expect(approvedRow).toBeVisible()
+  })
+}

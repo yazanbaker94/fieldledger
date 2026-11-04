@@ -34,6 +34,13 @@ function readRoute(): Route {
   return { view, cardId: view === 'welcome' ? null : new URLSearchParams(query).get('card') }
 }
 
+function hasLaterCards(known: Workspace, snapshot: Workspace) {
+  if (known.workspaceId !== snapshot.workspaceId) return false
+  // Cards are never deleted within a generation, and each change advances the card version.
+  const versions = new Map(snapshot.timecards.map((card) => [card.id, card.version]))
+  return known.timecards.some((card) => (versions.get(card.id) ?? 0) < card.version)
+}
+
 function writeRoute(view: View, cardId: string | null, replace = false) {
   const hash = `#${view}${cardId ? `?card=${encodeURIComponent(cardId)}` : ''}`
   if (window.location.hash !== hash) {
@@ -201,7 +208,9 @@ function App() {
   }, [navigate])
 
   const applyWorkspace = useCallback((data: Workspace) => {
-    const previousId = workspaceRef.current?.workspaceId
+    const current = workspaceRef.current
+    if (current && hasLaterCards(current, data)) return current
+    const previousId = current?.workspaceId
     if (previousId && previousId !== data.workspaceId) retireWorkspace(previousId)
     selectRetryWorkspace(data.workspaceId)
     workspaceRef.current = data
@@ -211,6 +220,7 @@ function App() {
     setWriteRefreshRequired(false)
     setTransition(workspaceTransition(data.workspaceId))
     if (routeView.current === 'manager') setManagerFresh(true)
+    return data
   }, [])
 
   const loadWorkspace = useCallback(async (showLoading = true) => {
@@ -227,8 +237,7 @@ function App() {
       if (version === fetchVersion.current && workspaceTransition(data.workspaceId) === 'retired') data = await api.workspace()
       if (version !== fetchVersion.current) return
       if (workspaceTransition(data.workspaceId) === 'retired') throw new Error('The workspace snapshot is retired.')
-      applyWorkspace(data)
-      return data
+      return applyWorkspace(data)
     } catch (error) {
       if (version !== fetchVersion.current) return
       if (workspaceRef.current) setRefreshError(true)
@@ -331,7 +340,12 @@ function App() {
         return false
       }
       // A queued response may describe a workspace another tab has already reset.
-      const latest = await api.workspace().catch(() => null)
+      const beforeVerification = workspaceRef.current
+      const verificationVersion = ++fetchVersion.current
+      const verified = await api.workspace().catch(() => null)
+      const superseded = verificationVersion !== fetchVersion.current
+      // A newer role or focus refresh may already have received a later snapshot.
+      const latest = superseded ? (workspaceRef.current !== beforeVerification ? workspaceRef.current : null) : verified
       const displayedId = workspaceRef.current?.workspaceId
       if (displayedId !== startingWorkspaceId && displayedId !== data.workspaceId && (!latest || latest.workspaceId === data.workspaceId)) {
         setMutationError('The demo workspace changed. You’re now viewing the current workspace.')
@@ -349,8 +363,7 @@ function App() {
         }
         return false
       }
-      fetchVersion.current += 1
-      applyWorkspace(snapshot)
+      if (!superseded || !latest) applyWorkspace(snapshot)
       if (!latest) {
         setRefreshError(true)
         setWriteRefreshRequired(true)

@@ -52,6 +52,8 @@ jobs:
             snapshot=$(readlink -e /app/asset-cache/current)
             test "$PREVIOUS_ASSETS_DIRECTORY" = "$snapshot/previous-assets"
             diff -qr /app/dist/assets "$snapshot/assets"
+            sh /usr/local/bin/fieldledger-entrypoint --mark-healthy
+            test "$(readlink -e /app/asset-cache/healthy)" = "$snapshot"
           '
       - run: bash deploy/test-postgresql-recovery.sh
       - run: npx playwright install --with-deps chromium

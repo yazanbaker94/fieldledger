@@ -53,7 +53,15 @@ test('field timecards against PostgreSQL', async (context) => {
       if (options?.idempotencyKey) headers.set('Idempotency-Key', options.idempotencyKey);
       const response = await fetch(`${base}${endpoint}`, { method: options?.body !== undefined ? 'POST' : 'GET', headers, body: JSON.stringify(options?.body) });
       const setCookie = response.headers.get('Set-Cookie');
-      if (setCookie) {
+      if (setCookie?.startsWith('__Host-fieldledger-retired-')) {
+        assert.equal(endpoint, '/reset');
+        assert.ok(setCookie.startsWith(`__Host-fieldledger-retired-${sentWorkspace}=1;`));
+        assert.match(setCookie, /; Secure(?:;|$)/i);
+        assert.match(setCookie, /; Path=\/(?:;|$)/i);
+        assert.match(setCookie, /SameSite=Lax/i);
+        assert.match(setCookie, /; Max-Age=120(?:;|$)/i);
+        assert.doesNotMatch(setCookie, /HttpOnly/i);
+      } else if (setCookie) {
         assert.match(setCookie, /^__Host-fieldledger=/);
         assert.match(setCookie, /HttpOnly/i);
         assert.match(setCookie, /; Secure(?:;|$)/i);
@@ -457,7 +465,7 @@ test('field timecards against PostgreSQL', async (context) => {
     const beforeReset = await second('/workspace');
     const reset = await first('/reset', { body: {} });
     assert.equal(reset.status, 200);
-    assert.equal(reset.setCookie, null);
+    assert.ok(reset.setCookie?.startsWith(`__Host-fieldledger-retired-${reset.sentWorkspace}=1;`));
     assert.notEqual(reset.data.workspaceId, reset.sentWorkspace);
     assert.equal(reset.data.project.approvedCents, 970_000);
     assert.equal(reset.data.project.pendingCents, 0);
