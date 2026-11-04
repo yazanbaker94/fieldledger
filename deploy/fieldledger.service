@@ -1,7 +1,7 @@
 [Unit]
 Description=FieldLedger timecard demo
 After=postgresql.service
-Requires=postgresql.service
+Wants=postgresql.service
 
 [Service]
 Type=simple
@@ -13,6 +13,7 @@ Environment=APP_ORIGIN=https://fieldledger.swoop.video
 Environment=HOST=127.0.0.1
 Environment=PORT=3088
 Environment=TRUST_PROXY=1
+Environment=PREVIOUS_ASSETS_DIRECTORY=/opt/fieldledger/current/previous-assets
 Environment="DATABASE_URL=postgresql:///fieldledger?host=/var/run/postgresql&user=fieldledger"
 ExecStart=/usr/bin/node --import tsx server/index.ts
 Restart=on-failure

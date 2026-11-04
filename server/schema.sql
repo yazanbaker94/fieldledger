@@ -84,7 +84,26 @@ CREATE TABLE IF NOT EXISTS audit_events (
   actor_id text NOT NULL REFERENCES people (id),
   action text NOT NULL CHECK (action IN ('submitted', 'returned', 'resubmitted', 'approved')),
   note text,
+  work_date date,
+  hours numeric(4, 2),
+  previous_work_date date,
+  previous_hours numeric(4, 2),
   occurred_at timestamptz NOT NULL DEFAULT now()
 );
 
+ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS work_date date,
+  ADD COLUMN IF NOT EXISTS hours numeric(4, 2),
+  ADD COLUMN IF NOT EXISTS previous_work_date date,
+  ADD COLUMN IF NOT EXISTS previous_hours numeric(4, 2);
 CREATE INDEX IF NOT EXISTS audit_events_by_timecard ON audit_events (timecard_id, occurred_at, id);
+
+CREATE TABLE IF NOT EXISTS timecard_correction_receipts (
+  session_id uuid NOT NULL REFERENCES demo_sessions (id) ON DELETE CASCADE,
+  workspace_id uuid NOT NULL,
+  request_id uuid NOT NULL,
+  timecard_id uuid NOT NULL REFERENCES timecards (id) ON DELETE CASCADE,
+  request_digest text NOT NULL,
+  PRIMARY KEY (session_id, workspace_id, request_id)
+);
+
+CREATE INDEX IF NOT EXISTS correction_receipts_by_timecard ON timecard_correction_receipts (timecard_id);

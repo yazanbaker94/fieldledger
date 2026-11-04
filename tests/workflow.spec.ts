@@ -77,8 +77,6 @@ test("screenshots and persistent budget changes across the worker, foreman, and 
   await expect(reviewer.getByText("$100 over budget", { exact: true })).toBeVisible();
   await reviewer.getByRole("button", { name: /View timecard for/ }).first().click();
   await expect(reviewer.getByRole("region", { name: "Cost details" }).getByText("$400", { exact: true })).toBeVisible();
-  await reviewer.setViewportSize({ width: 1440, height: 1160 });
-  await screenshot(reviewer, "manager");
   await reviewer.reload();
   await expect(reviewer.locator("#approved-total")).toContainText("$10,100");
   await reviewer.getByRole("button", { name: /View timecard for/ }).first().click();
@@ -111,6 +109,7 @@ test("screenshots of mobile correction and reset after approval", async ({ page 
   await correction.click();
   await page.getByLabel("Hours worked").fill("8");
   await page.getByRole("button", { name: "Resubmit timecard" }).click();
+  await expect(page.getByText("Timecard resubmitted for review.", { exact: true })).toBeVisible();
   await role(page, "Foreman").click();
   await page.getByRole("button", { name: "Approve timecard" }).click();
   await expect(page.getByText("Timecard approved.", { exact: true })).toBeVisible();
@@ -188,7 +187,7 @@ test("leaving and re-entering the demo during first load keeps a single workspac
   expect(count).toBe(1);
 });
 
-test("mobile handoffs follow the backdated card through correction and approval", async ({ page }) => {
+test("screenshots of the backdated mobile handoff and approved correction history", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await enterDemo(page);
   const workDate = page.getByLabel("Work date");
@@ -219,6 +218,13 @@ test("mobile handoffs follow the backdated card through correction and approval"
   await expect(details).toContainText("$50/hr");
   await expect(details).toContainText("$400");
   await expect(details).toContainText("Please include the final hour spent on site.");
+  await expect(details).toContainText(/Previous entry\s*:?\s*7 hrs/);
+  await expect(details).toContainText(/Updated entry\s*:?\s*8 hrs/);
+  if (process.env.npm_lifecycle_event === "screenshots") {
+    await page.setViewportSize({ width: 1440, height: 1160 });
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await screenshot(page, "manager");
+  }
 });
 
 test("returning from the welcome screen reloads changes made in another tab", async ({ page, context }) => {
@@ -334,4 +340,164 @@ test("two tabs opening the demo for the first time share a single browser worksp
   await expect(other.locator("#approved-total")).toContainText("$9,700");
   expect(ids[0]).toBeTruthy();
   expect(ids[1]).toBe(ids[0]);
+});
+
+async function returnCurrentTimecard(page: Page, reason: string) {
+  await page.getByRole("button", { name: "Return with a note" }).click();
+  await page.getByLabel("Correction note").fill(reason);
+  await page.getByRole("button", { name: "Send back to worker" }).click();
+  await expect(page.getByText("Timecard returned to the worker.", { exact: true })).toBeVisible();
+}
+
+async function refreshFromAnotherTab(page: Page) {
+  await page.bringToFront();
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+}
+
+test("linked and manually selected foreman cards stay exact through updates in another tab", async ({ page, context }) => {
+  await enterDemo(page);
+  const workDate = page.getByLabel("Work date");
+  const today = await workDate.inputValue();
+  const yesterday = new Date(Date.parse(today + "T12:00:00Z") - 86_400_000).toISOString().slice(0, 10);
+  await submitTimecard(page, 6);
+  await workDate.fill(yesterday);
+  await submitTimecard(page, 7);
+  await page.getByRole("button", { name: "Go to foreman" }).click();
+  const details = page.getByRole("region", { name: "Timecard review" });
+  await expect(details.getByText("7 hrs", { exact: true })).toBeVisible();
+  const linkedUrl = page.url();
+
+  const reviewer = await context.newPage();
+  await reviewer.goto(linkedUrl);
+  await reviewer.getByRole("button", { name: "Approve timecard" }).click();
+  await expect(reviewer.getByText("Timecard approved.", { exact: true })).toBeVisible();
+  await refreshFromAnotherTab(page);
+  await expect(details).toContainText("This timecard is no longer pending.");
+  await expect(details.getByText("7 hrs", { exact: true })).toBeVisible();
+  await expect(details.getByRole("button", { name: "Approve timecard" })).toHaveCount(0);
+  expect(page.url()).toBe(linkedUrl);
+
+  await role(page, "Foreman").click();
+  await page.getByRole("region", { name: "Review queue" }).getByRole("button", { name: /View timecard for.*6 hrs/ }).click();
+  await expect(details.getByText("6 hrs", { exact: true })).toBeVisible();
+  await reviewer.getByRole("button", { name: "Reset demo" }).click();
+  await reviewer.getByRole("button", { name: "Reset workspace" }).click();
+  await expect(reviewer.getByText("A fresh workspace is ready.", { exact: true })).toBeVisible();
+  await role(reviewer, "Worker").click();
+  await submitTimecard(reviewer, 5);
+  await refreshFromAnotherTab(page);
+  await expect(details.getByRole("heading", { name: "Selected timecard unavailable" })).toBeVisible();
+  await expect(details.getByRole("button", { name: "Approve timecard" })).toHaveCount(0);
+  await page.getByRole("region", { name: "Review queue" }).getByRole("button", { name: /View timecard for.*5 hrs/ }).click();
+  await expect(details.getByText("5 hrs", { exact: true })).toBeVisible();
+  await expect(details.getByRole("button", { name: "Approve timecard" })).toBeEnabled();
+});
+
+test("a lost correction response reconciles the same card after focus refresh", async ({ page, context }) => {
+  await enterDemo(page);
+  await submitTimecard(page, 7);
+  await page.getByRole("button", { name: "Go to foreman" }).click();
+  await returnCurrentTimecard(page, "Please include the final hour spent on site.");
+  await page.getByRole("button", { name: "Go to worker" }).click();
+  await page.getByLabel("Hours worked").fill("8");
+  let responseStatus = 0;
+  let correctionRequestId: string | null = null;
+  await page.route("**/api/timecards/*/resubmit", async route => {
+    correctionRequestId = await route.request().headerValue("Idempotency-Key");
+    const saved = await route.fetch();
+    responseStatus = saved.status();
+    await route.abort();
+  }, { times: 1 });
+  await page.getByRole("button", { name: "Resubmit timecard" }).click();
+  await expect.poll(() => responseStatus).toBe(200);
+  await expect(page.getByRole("alert")).toContainText(/try again|confirm|interrupted/i);
+  expect(correctionRequestId).toBeTruthy();
+  const oldClientStorage = await page.evaluate(() => sessionStorage.getItem("fieldledger.submission-retries.v1"));
+  expect(oldClientStorage ?? "").not.toContain(correctionRequestId!);
+  await refreshFromAnotherTab(page);
+  await expect(page.getByText("Recovered your resubmitted timecard.", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Go to foreman" }).click();
+  await expect(page.getByRole("region", { name: "Timecard review" })).toContainText("8 hrs");
+
+  const response = await context.request.get("/api/workspace");
+  const workspace = await response.json() as { project: { pendingCents: number }; timecards: { status: string }[] };
+  expect(workspace.project.pendingCents).toBe(40_000);
+  expect(workspace.timecards.filter(card => card.status === "pending")).toHaveLength(1);
+});
+
+test("a correction draft requires explicit review after another tab starts a newer cycle", async ({ page, context }) => {
+  await enterDemo(page);
+  await submitTimecard(page, 7);
+  await page.getByRole("button", { name: "Go to foreman" }).click();
+  await returnCurrentTimecard(page, "Please check the shift.");
+  await page.getByRole("button", { name: "Go to worker" }).click();
+  await page.getByLabel("Hours worked").fill("8");
+
+  const other = await context.newPage();
+  await other.goto(page.url());
+  await other.getByLabel("Hours worked").fill("9");
+  await other.getByRole("button", { name: "Resubmit timecard" }).click();
+  await other.getByRole("button", { name: "Go to foreman" }).click();
+  await returnCurrentTimecard(other, "Confirm the nine hours against your shift log.");
+  await refreshFromAnotherTab(page);
+
+  await expect(page.getByText("Timecard changed while you were editing.", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Hours worked")).toHaveValue("8");
+  await expect(page.getByRole("button", { name: "Resubmit timecard" })).toBeDisabled();
+  await page.getByRole("button", { name: "Review latest timecard" }).click();
+  await expect(page.getByLabel("Hours worked")).toHaveValue("9");
+  await expect(page.getByText("Confirm the nine hours against your shift log.", { exact: true }).first()).toBeVisible();
+});
+
+test("a foreman note stays tied to the version reviewed when it was drafted", async ({ page, context }) => {
+  await enterDemo(page);
+  await submitTimecard(page, 7);
+  await page.getByRole("button", { name: "Go to foreman" }).click();
+  await page.getByRole("button", { name: "Return with a note" }).click();
+  const note = page.getByLabel("Correction note");
+  await note.fill("Original draft for the seven-hour entry.");
+
+  const other = await context.newPage();
+  await other.goto(page.url());
+  await returnCurrentTimecard(other, "Please check the shift.");
+  await other.getByRole("button", { name: "Go to worker" }).click();
+  await other.getByLabel("Hours worked").fill("9");
+  await other.getByRole("button", { name: "Resubmit timecard" }).click();
+  await expect(other.getByText("Timecard resubmitted for review.", { exact: true })).toBeVisible();
+  await refreshFromAnotherTab(page);
+
+  await expect(page.getByText("Timecard changed while you were writing this note.", { exact: true })).toBeVisible();
+  await expect(note).toHaveValue("Original draft for the seven-hour entry.");
+  await expect(page.getByRole("button", { name: "Send back to worker" })).toBeDisabled();
+  await page.getByRole("button", { name: "Review latest timecard" }).click();
+  await expect(page.getByRole("region", { name: "Timecard review" }).getByText("9 hrs", { exact: true })).toBeVisible();
+});
+
+test("desktop keyboard review offers a direct path to and from details and restores reset focus", async ({ page }) => {
+  await enterDemo(page);
+  await submitTimecard(page, 8);
+  await role(page, "Foreman").click();
+  const queue = page.getByRole("region", { name: "Review queue" });
+  const pending = queue.getByRole("button", { name: /View timecard for/ }).first();
+  const review = page.getByRole("region", { name: "Timecard review" });
+  await pending.press("Enter");
+  await expect(review).toBeFocused();
+  await review.getByRole("button", { name: "Back to review queue" }).press("Enter");
+  await expect(pending).toBeFocused();
+
+  await role(page, "Manager").click();
+  const ledger = page.getByRole("region", { name: "Timecard ledger" });
+  const entry = ledger.getByRole("button", { name: /View timecard for/ }).first();
+  const details = page.getByRole("region", { name: "Cost details" });
+  await entry.press("Enter");
+  await expect(details).toBeFocused();
+  await details.getByRole("button", { name: "Back to timecard ledger" }).press("Enter");
+  await expect(entry).toBeFocused();
+
+  const reset = page.getByRole("button", { name: "Reset demo" });
+  await reset.press("Enter");
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(reset).toBeFocused();
 });

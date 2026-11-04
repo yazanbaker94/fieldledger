@@ -38,7 +38,9 @@ For UI development, run `npm run dev:api` and `npm run dev` in separate terminal
 
 - React and TypeScript render the phone and desktop views. A TypeScript API checks input and enforces valid timecard transitions.
 - PostgreSQL stores source records, workspace state, timecards, and review events. Approval stores the applied labour rate and the exact cost, so changing a reference rate leaves earlier approvals historically accurate.
-- The server enforces a 24-hour daily limit per worker across split entries. Submission retries reuse a request ID, and the app can look up a saved card if the response was interrupted.
+- The server enforces a 24-hour daily limit per worker across split entries. Submission and correction retries reuse a request ID, and the app can look up a saved card if the response was interrupted.
+- Audit history records the hours and work date on new submissions and preserves both values when a card is corrected.
+- CSV fixtures supply initial reference values. Once imported, PostgreSQL rates determine the cost of both newly seeded history and new timecards using each work date.
 - The budget view sums approved timecards in SQL. Pending labour is displayed separately. The approval, cost, and audit event commit in one transaction.
 - The prototype uses one assigned project and regular-time labour in Canadian dollars. Its budget comparison uses approved labour cost.
 

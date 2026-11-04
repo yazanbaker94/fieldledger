@@ -1,3 +1,4 @@
+import { realpath } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { Pool } from 'pg';
 import { createApp } from './app.js';
@@ -20,10 +21,17 @@ pool.on('error', (error) => console.error('Idle database connection error', erro
 
 try {
   const fixtures = await prepareDatabase(pool);
+  const previousAssetsDirectory = process.env.PREVIOUS_ASSETS_DIRECTORY
+    ? await realpath(process.env.PREVIOUS_ASSETS_DIRECTORY).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== 'ENOENT') throw error;
+      return undefined;
+    })
+    : undefined;
   const app = createApp(pool, fixtures, {
     origin,
     secureCookies: origin?.startsWith('https://') ?? false,
     staticDirectory: fileURLToPath(new URL('../dist/', import.meta.url)),
+    previousAssetsDirectory,
     trustProxy,
   });
   const cleanup = setInterval(() => {

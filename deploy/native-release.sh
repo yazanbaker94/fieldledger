@@ -131,6 +131,10 @@ fi
 
 release=$(sudo -n mktemp -d "$app_root/releases/$revision.XXXXXXXX")
 sudo -n cp -a --no-preserve=ownership "$stage"/{dist,node_modules,server,package.json,tsconfig.json} "$release/"
+if [[ -d "$current/dist/assets" ]]; then
+  # Snapshot only the previous live build. Rollback switches its asset fallback with the release.
+  sudo -n cp -al -- "$current/dist/assets" "$release/previous-assets"
+fi
 sudo -n chmod 0755 "$release"
 changes_started=1
 install_unit "$stage/deploy/fieldledger.service"

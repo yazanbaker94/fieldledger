@@ -19,6 +19,10 @@ export type Timecard = {
     actor: string
     at: string
     note: string | null
+    previousWorkDate?: string | null
+    previousHours?: number | null
+    workDate?: string | null
+    hours?: number | null
   }[]
 }
 
@@ -50,10 +54,11 @@ type RequestOptions = {
   body?: object
   role?: Role
   workspaceId?: string
+  idempotencyKey?: string
   signal?: AbortSignal
 }
 
-async function request(path: string, { body, role, workspaceId, signal }: RequestOptions = {}): Promise<Workspace> {
+async function request(path: string, { body, role, workspaceId, idempotencyKey, signal }: RequestOptions = {}): Promise<Workspace> {
   const response = await fetch(`/api${path}`, {
     method: body ? 'POST' : 'GET',
     headers: {
@@ -61,6 +66,7 @@ async function request(path: string, { body, role, workspaceId, signal }: Reques
       ...(body && { 'Content-Type': 'application/json' }),
       ...(role && { 'X-Demo-Role': role }),
       ...(workspaceId && { 'X-Demo-Workspace': workspaceId }),
+      ...(idempotencyKey && { 'Idempotency-Key': idempotencyKey }),
     },
     body: body && JSON.stringify(body),
     signal,
@@ -79,10 +85,16 @@ export const api = {
   submit: (workspaceId: string, workDate: string, hours: number, requestId: string) =>
     request('/timecards', { body: { workDate, hours, requestId }, role: 'worker', workspaceId }),
   findSubmission: (workspaceId: string, requestId: string) =>
-    request(`/timecards/submissions/${encodeURIComponent(requestId)}`, { workspaceId, signal: AbortSignal.timeout(5000) }),
-  resubmit: (workspaceId: string, card: Timecard, workDate: string, hours: number) =>
-    request(`/timecards/${encodeURIComponent(card.id)}/resubmit`, { body: { workDate, hours, version: card.version }, role: 'worker', workspaceId }),
-  decide: (workspaceId: string, card: Timecard, decision: 'approve' | 'return', reason?: string) =>
-    request(`/timecards/${encodeURIComponent(card.id)}/decision`, { body: { decision, reason, version: card.version }, role: 'foreman', workspaceId }),
+    request(`/timecards/submissions/${encodeURIComponent(requestId)}`, { workspaceId, signal: AbortSignal.timeout?.(5000) }),
+  resubmit: (workspaceId: string, cardId: string, version: number, workDate: string, hours: number, requestId: string) =>
+    request(`/timecards/${encodeURIComponent(cardId)}/resubmit`, {
+      body: { workDate, hours, version },
+      role: 'worker',
+      workspaceId,
+      idempotencyKey: requestId,
+      signal: AbortSignal.timeout?.(15000),
+    }),
+  decide: (workspaceId: string, cardId: string, version: number, decision: 'approve' | 'return', reason?: string) =>
+    request(`/timecards/${encodeURIComponent(cardId)}/decision`, { body: { decision, reason, version }, role: 'foreman', workspaceId }),
   reset: (workspaceId: string) => request('/reset', { body: {}, workspaceId }),
 }

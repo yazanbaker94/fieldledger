@@ -15,6 +15,8 @@ sudo -u fieldledger psql -d fieldledger -c 'select current_user;'
 
 From a clone on the VPS, deploy a reviewed commit. The script builds the release, validates its service unit, and serializes service changes with a host-local lock. It checks both the health endpoint and app page before completing. If an update fails, it restores the previous unit and release, then checks the restored service if it was running. A failed first deployment removes its service unit and release. The first successful deployment enables the service on boot. Updates start the service and preserve its existing boot configuration.
 
+The native app also serves hashed build assets from the immediately preceding live release. This covers browsers that received its HTML during a deployment. The fallback travels with the release during rollback and uses hard links to the previous build's immutable assets.
+
 ```sh
 bash deploy/native-release.sh HEAD
 ```
@@ -36,6 +38,8 @@ sudo journalctl -u fieldledger.service -n 50 --no-pager
 ```
 
 To roll back a healthy deployment after a functional regression, rerun `bash deploy/native-release.sh <previous-commit>` and repeat the public checks. If automatic recovery fails, the script prints the location of the retained rollback files. Code rollback uses the existing database. Keep schema changes compatible with the previous release or plan a separate database restore before deploying them.
+
+FieldLedger starts after PostgreSQL. During a planned PostgreSQL stop and start, FieldLedger stays running and its health endpoint returns an error until the database accepts connections again. Recheck the public health endpoint after database maintenance.
 
 ## Docker Compose
 

@@ -36,5 +36,6 @@ jobs:
       - run: npm run build
       - run: npm test
       - run: bash deploy/test-native-release.sh
+      - run: bash deploy/test-postgresql-recovery.sh
       - run: npx playwright install --with-deps chromium
       - run: npm run test:browser

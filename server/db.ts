@@ -34,8 +34,8 @@ const historyRow = z.strictObject({
   hours: z.string().regex(/^\d{1,2}(?:\.\d{1,2})?$/).transform(Number).pipe(z.number().gt(0).max(24)),
 });
 
-async function readFixture<T>(filename: string, schema: z.ZodType<T>): Promise<T[]> {
-  const file = await readFile(new URL(`./fixtures/${filename}`, import.meta.url), 'utf8');
+async function readFixture<T>(directory: URL, filename: string, schema: z.ZodType<T>): Promise<T[]> {
+  const file = await readFile(new URL(filename, directory), 'utf8');
   let rows: unknown[];
   try {
     rows = parse(file, { columns: true, bom: true, skip_empty_lines: true });
@@ -63,12 +63,12 @@ function ensureUnique<T>(rows: T[], key: (row: T) => string | number, filename: 
   }
 }
 
-async function readFixtures() {
+async function readFixtures(directory: URL) {
   const [projects, people, rates, history] = await Promise.all([
-    readFixture('projects.csv', projectRow),
-    readFixture('people.csv', personRow),
-    readFixture('rates.csv', rateRow),
-    readFixture('history.csv', historyRow),
+    readFixture(directory, 'projects.csv', projectRow),
+    readFixture(directory, 'people.csv', personRow),
+    readFixture(directory, 'rates.csv', rateRow),
+    readFixture(directory, 'history.csv', historyRow),
   ]);
   const project = projects[0];
   if (!project || projects.length !== 1) throw new Error('projects.csv must contain one demo project.');
@@ -87,7 +87,7 @@ async function readFixtures() {
   if (!historicalRate || rates.some((rate) => rate.project_id !== project.id || rate.worker_id !== worker.id)) {
     throw new Error('rates.csv must include a baseline rate dated 2000-01-01 and refer to the assigned worker.');
   }
-  return { project, people, rates, history, worker, foreman, manager, historicalRate };
+  return { project, people, rates, history, worker, foreman, manager };
 }
 
 export type Fixtures = Awaited<ReturnType<typeof readFixtures>>;
@@ -108,14 +108,15 @@ export async function transaction<T>(pool: Pool, work: (client: PoolClient) => P
   }
 }
 
-export async function prepareDatabase(pool: Pool): Promise<Fixtures> {
+export async function prepareDatabase(pool: Pool, fixtureDirectory = new URL('./fixtures/', import.meta.url)): Promise<Fixtures> {
   const [schema, fixtures] = await Promise.all([
     readFile(new URL('./schema.sql', import.meta.url), 'utf8'),
-    readFixtures(),
+    readFixtures(fixtureDirectory),
   ]);
   await transaction(pool, async (client) => {
     await client.query('SELECT pg_advisory_xact_lock(66303400)');
     await client.query(schema);
+    // Fixtures fill missing reference keys. Existing records remain canonical on subsequent starts.
     const { project, people, rates } = fixtures;
     await client.query(
       'INSERT INTO projects (id, name, code, location, budget_cents) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (id) DO NOTHING',
@@ -136,7 +137,7 @@ export async function prepareDatabase(pool: Pool): Promise<Fixtures> {
 }
 
 export async function seedHistory(client: PoolClient, session: string, fixtures: Fixtures) {
-  await client.query(`
+  const seeded = await client.query(`
     WITH historical_shifts AS (
       SELECT (now() AT TIME ZONE 'America/Toronto')::date - work_days_ago AS work_date, hours
       FROM jsonb_to_recordset($5::jsonb) AS imported(work_days_ago integer, hours numeric)
@@ -146,13 +147,19 @@ export async function seedHistory(client: PoolClient, session: string, fixtures:
       SELECT $1, $2, $3, work_date, hours, 'approved', 2,
         (work_date + time '17:00') AT TIME ZONE 'America/Toronto',
         (work_date + time '18:30') AT TIME ZONE 'America/Toronto',
-        $4, $6::integer, round(hours * $6::integer)::integer
+        $4, rate.rate_cents, round(hours * rate.rate_cents)::integer
       FROM historical_shifts
-      RETURNING id, submitted_at, decision_at
+      CROSS JOIN LATERAL (
+        SELECT rate_cents FROM labour_rates
+        WHERE project_id = $2 AND worker_id = $3 AND effective_from <= historical_shifts.work_date
+        ORDER BY effective_from DESC LIMIT 1
+      ) rate
+      RETURNING id, work_date, hours, submitted_at, decision_at
     )
-    INSERT INTO audit_events (timecard_id, actor_id, action, occurred_at)
-    SELECT id, $3, 'submitted', submitted_at FROM cards
+    INSERT INTO audit_events (timecard_id, actor_id, action, occurred_at, work_date, hours)
+    SELECT id, $3, 'submitted', submitted_at, work_date, hours FROM cards
     UNION ALL
-    SELECT id, $4, 'approved', decision_at FROM cards
-  `, [session, fixtures.project.id, fixtures.worker.id, fixtures.foreman.id, JSON.stringify(fixtures.history), fixtures.historicalRate.rate_cents]);
+    SELECT id, $4, 'approved', decision_at, NULL, NULL FROM cards
+  `, [session, fixtures.project.id, fixtures.worker.id, fixtures.foreman.id, JSON.stringify(fixtures.history)]);
+  if (seeded.rowCount !== fixtures.history.length * 2) throw new Error('Every historical shift must have a persisted labour rate.');
 }

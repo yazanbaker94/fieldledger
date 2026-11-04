@@ -22,9 +22,9 @@ const cardFields = {
 };
 
 const version = z.int().min(1).max(25);
-export const cardId = z.uuid();
-export const submitInput = z.strictObject({ ...cardFields, requestId: z.uuid() });
-export const resubmitInput = z.strictObject({ ...cardFields, version });
+export const cardId = z.uuid().transform((id) => id.toLowerCase());
+export const submitInput = z.strictObject({ ...cardFields, requestId: cardId });
+export const resubmitInput = z.strictObject({ ...cardFields, version, requestId: cardId.optional() });
 export const decisionInput = z.discriminatedUnion('decision', [
   z.strictObject({ decision: z.literal('approve'), version, reason: z.literal('').optional() }),
   z.strictObject({ decision: z.literal('return'), version, reason: z.string().trim().min(1).max(500)
@@ -39,6 +39,10 @@ interface AuditEvent {
   actor: string;
   at: string;
   note: string | null;
+  workDate: string | null;
+  hours: number | null;
+  previousWorkDate: string | null;
+  previousHours: number | null;
 }
 
 interface Timecard {
@@ -85,7 +89,9 @@ export async function readWorkspace(db: Pool | PoolClient, session: string, fixt
         ORDER BY effective_from DESC LIMIT 1
       ) rate ON card.status <> 'approved'
       LEFT JOIN LATERAL (
-        SELECT json_agg(json_build_object('action', event.action, 'actor', actor.name, 'at', event.occurred_at, 'note', event.note)
+        SELECT json_agg(json_build_object('action', event.action, 'actor', actor.name, 'at', event.occurred_at, 'note', event.note,
+          'workDate', to_char(event.work_date, 'YYYY-MM-DD'), 'hours', event.hours,
+          'previousWorkDate', to_char(event.previous_work_date, 'YYYY-MM-DD'), 'previousHours', event.previous_hours)
           ORDER BY event.occurred_at, event.id) AS events
         FROM audit_events event JOIN people actor ON actor.id = event.actor_id
         WHERE event.timecard_id = card.id
@@ -176,8 +182,16 @@ async function getRate(client: PoolClient, project: string, worker: string, work
   return result.rows[0].rate_cents;
 }
 
-async function recordAction(client: PoolClient, card: string, actor: string, action: string, note: string | null = null) {
-  await client.query('INSERT INTO audit_events (timecard_id, actor_id, action, note) VALUES ($1, $2, $3, $4)', [card, actor, action, note]);
+type WorkEntry = { workDate: string; hours: number };
+
+async function recordAction(
+  client: PoolClient, card: string, actor: string, action: AuditEvent['action'],
+  { note = null, current, previous }: { note?: string | null; current?: WorkEntry; previous?: WorkEntry } = {},
+) {
+  await client.query(`
+    INSERT INTO audit_events (timecard_id, actor_id, action, note, work_date, hours, previous_work_date, previous_hours)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+  `, [card, actor, action, note, current?.workDate, current?.hours, previous?.workDate, previous?.hours]);
 }
 
 async function verifyDailyHours(
@@ -195,17 +209,20 @@ async function verifyDailyHours(
   }
 }
 
-async function lookupSubmission(client: PoolClient, session: string, requestId: string) {
-  const result = await client.query<{ id: string; request_digest: string }>(`
-    SELECT id, request_digest FROM timecards WHERE session_id = $1 AND request_id = $2
-  `, [session, requestId]);
+async function lookupSubmission(client: PoolClient, session: string, workspace: string, requestId: string) {
+  const result = await client.query<{ id: string; request_digest: string; kind: 'submission' | 'correction' }>(`
+    SELECT id, request_digest, 'submission' AS kind FROM timecards WHERE session_id = $1 AND request_id = $3
+    UNION ALL
+    SELECT timecard_id, request_digest, 'correction' AS kind FROM timecard_correction_receipts
+    WHERE session_id = $1 AND workspace_id = $2 AND request_id = $3
+  `, [session, workspace, requestId]);
   return result.rows[0];
 }
 
 export function reconcileSubmission(pool: Pool, session: string, workspace: string, fixtures: Fixtures, requestId: string) {
   return transaction(pool, async (client) => {
     await lockWorkspace(client, session, workspace, fixtures.project.id);
-    const existing = await lookupSubmission(client, session, requestId);
+    const existing = await lookupSubmission(client, session, workspace, requestId);
     if (!existing) throw new ApiError(404, 'This submission has not been recorded.');
     return { ...await writtenWorkspace(client, session, fixtures), affectedCardId: existing.id };
   });
@@ -216,9 +233,11 @@ export function submitCard(pool: Pool, session: string, workspace: string, fixtu
   return mutate(pool, session, workspace, fixtures, async (client) => {
     await verifyAssignment(client, project.id, worker.id, 'worker');
     const digest = createHash('sha256').update(JSON.stringify([input.workDate, input.hours])).digest('hex');
-    const existing = await lookupSubmission(client, session, input.requestId);
+    const existing = await lookupSubmission(client, session, workspace, input.requestId);
     if (existing) {
-      if (existing.request_digest !== digest) throw new ApiError(409, 'This submission ID is already used by a different timecard.');
+      if (existing.kind !== 'submission' || existing.request_digest !== digest) {
+        throw new ApiError(409, 'This request ID is already used by a different timecard submission.');
+      }
       return existing.id;
     }
     const count = await client.query<{ count: number }>('SELECT count(*)::integer FROM timecards WHERE session_id = $1', [session]);
@@ -229,7 +248,7 @@ export function submitCard(pool: Pool, session: string, workspace: string, fixtu
       INSERT INTO timecards (session_id, project_id, worker_id, work_date, hours, status, request_id, request_digest)
       VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7) RETURNING id
     `, [session, project.id, worker.id, input.workDate, input.hours, input.requestId, digest]);
-    await recordAction(client, inserted.rows[0].id, worker.id, 'submitted');
+    await recordAction(client, inserted.rows[0].id, worker.id, 'submitted', { current: input });
     return inserted.rows[0].id;
   });
 }
@@ -251,7 +270,19 @@ export function resubmitCard(pool: Pool, session: string, workspace: string, fix
     await verifyAssignment(client, project.id, worker.id, 'worker');
     const card = await findCard(client, session, id, project.id);
     if (card.worker_id !== worker.id) throw new ApiError(403, 'Only the assigned worker can resubmit this timecard.');
-    if (card.version === input.version + 1 && card.status === 'pending' && card.work_date === input.workDate && card.hours === input.hours) return id;
+    const digest = input.requestId && createHash('sha256').update(JSON.stringify([id, input.version, input.workDate, input.hours])).digest('hex');
+    if (input.requestId) {
+      const existing = await lookupSubmission(client, session, workspace, input.requestId);
+      if (existing) {
+        if (existing.kind !== 'correction' || existing.id !== id || existing.request_digest !== digest) {
+          throw new ApiError(409, 'This request ID is already used by a different timecard submission.');
+        }
+        return id;
+      }
+    } else if (card.version === input.version + 1 && card.status === 'pending' && card.work_date === input.workDate && card.hours === input.hours) {
+      // Older bundles may still submit corrections without a request ID.
+      return id;
+    }
     if (card.version !== input.version || card.status !== 'returned') throw new ApiError(409, 'This timecard has changed. Refresh before resubmitting.');
     if (card.version >= 24) throw new ApiError(409, 'This timecard reached its revision limit. Start a new timecard.');
     await getRate(client, project.id, worker.id, input.workDate);
@@ -262,7 +293,13 @@ export function resubmitCard(pool: Pool, session: string, workspace: string, fix
       WHERE id = $1 AND version = $4 AND status = 'returned'
     `, [id, input.workDate, input.hours, input.version]);
     if (updated.rowCount !== 1) throw new ApiError(409, 'This timecard has changed. Refresh before resubmitting.');
-    await recordAction(client, id, worker.id, 'resubmitted');
+    await recordAction(client, id, worker.id, 'resubmitted', { current: input, previous: { workDate: card.work_date, hours: card.hours } });
+    if (input.requestId) {
+      await client.query(`
+        INSERT INTO timecard_correction_receipts (session_id, workspace_id, request_id, timecard_id, request_digest)
+        VALUES ($1, $2, $3, $4, $5)
+      `, [session, workspace, input.requestId, id, digest]);
+    }
     return id;
   });
 }
@@ -285,7 +322,7 @@ export function decideCard(pool: Pool, session: string, workspace: string, fixtu
       WHERE id = $1 AND version = $6 AND status = 'pending'
     `, [id, status, foreman.id, reason, rate, input.version]);
     if (updated.rowCount !== 1) throw new ApiError(409, 'This timecard has changed. Refresh before making a decision.');
-    await recordAction(client, id, foreman.id, status, reason);
+    await recordAction(client, id, foreman.id, status, { note: reason });
     return id;
   });
 }

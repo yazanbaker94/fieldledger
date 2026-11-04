@@ -105,7 +105,7 @@ function ResetDialog({ busy, onClose, onReset }: { busy: boolean; onClose: () =>
   }, [])
 
   return (
-    <dialog ref={ref} className="reset-dialog" aria-labelledby="reset-title" onCancel={onClose}>
+    <dialog ref={ref} className="reset-dialog" aria-labelledby="reset-title" onCancel={(event) => { event.preventDefault(); onClose() }}>
       <h2 id="reset-title">Start a fresh demo?</h2>
       <p>This opens a new workspace with the original timecards and labour budget.</p>
       <div className="form-actions">
@@ -131,6 +131,7 @@ function App() {
   const workspaceRef = useRef<Workspace | null>(null)
   const main = useRef<HTMLElement>(null)
   const feedback = useRef<HTMLDivElement>(null)
+  const resetTrigger = useRef<HTMLButtonElement>(null)
 
   const go = useCallback((target: View, targetCardId?: string) => {
     const hash = targetCardId ? `${target}?card=${encodeURIComponent(targetCardId)}` : target
@@ -221,7 +222,10 @@ function App() {
     setNotice(null)
     try {
       const data = await operation()
-      if (!data) return false
+      if (!data) {
+        void loadWorkspace(false)
+        return false
+      }
       fetchVersion.current += 1
       applyWorkspace(data)
       if (window.location.hash === startingHash) setNotice({ message, next, cardId: data.affectedCardId })
@@ -248,6 +252,11 @@ function App() {
     if (workspace) await mutate(() => api.reset(workspace.workspaceId), 'A fresh workspace is ready.')
   }
 
+  function closeReset() {
+    setResetOpen(false)
+    requestAnimationFrame(() => resetTrigger.current?.focus())
+  }
+
   const pendingCount = workspace?.timecards.filter((card) => card.status === 'pending').length ?? 0
   const roleKey = `${workspace?.workspaceId ?? ''}:${cardId ?? ''}`
 
@@ -272,7 +281,7 @@ function App() {
                   </a>
                 ))}
               </nav>
-              <button className="reset-button" type="button" onClick={() => setResetOpen(true)} disabled={busy || !workspace}>
+              <button ref={resetTrigger} className="reset-button" type="button" onClick={() => setResetOpen(true)} disabled={busy || !workspace}>
                 <RotateCcw size={15} /> <span>Reset demo</span>
               </button>
             </div>
@@ -291,9 +300,9 @@ function App() {
               </section>
             ) : <p className="panel workspace-loading" role="status">Opening your workspace…</p>)}
             {workspace && view === 'worker' && <WorkerView key={roleKey} cardId={cardId} data={workspace} busy={busy} run={mutate} go={go} />}
-            {workspace && view === 'foreman' && <ForemanView key={roleKey} cardId={cardId} data={workspace} busy={busy} run={mutate} go={go} />}
+            {workspace && view === 'foreman' && <ForemanView key={cardId ?? 'queue'} cardId={cardId} data={workspace} busy={busy} run={mutate} go={go} />}
             {workspace && view === 'manager' && <ManagerView key={roleKey} cardId={cardId} data={workspace} />}
-            {resetOpen && <ResetDialog busy={busy} onClose={() => setResetOpen(false)} onReset={reset} />}
+            {resetOpen && <ResetDialog busy={busy} onClose={closeReset} onReset={reset} />}
           </div>
         )}
       </main>

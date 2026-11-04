@@ -13,6 +13,7 @@ interface Options {
   origin?: string;
   secureCookies?: boolean;
   staticDirectory?: string;
+  previousAssetsDirectory?: string;
   trustProxy?: number;
 }
 
@@ -154,7 +155,12 @@ export function createApp(pool: Pool, fixtures: Fixtures, options: Options = {})
 
   api.post('/timecards/:id/resubmit', async (req, res) => {
     requireRole(req, 'worker');
-    const workspace = await resubmitCard(pool, requireSession(req), requireWorkspace(req), fixtures, validate(cardId, req.params.id), validate(resubmitInput, req.body));
+    const key = req.get('Idempotency-Key');
+    if (key !== undefined && req.body?.requestId !== undefined && req.body.requestId !== key) {
+      throw new ApiError(400, 'The correction request IDs must match.');
+    }
+    const body = key === undefined ? req.body : { ...req.body, requestId: key };
+    const workspace = await resubmitCard(pool, requireSession(req), requireWorkspace(req), fixtures, validate(cardId, req.params.id), validate(resubmitInput, body));
     res.json(workspace);
   });
 
@@ -174,7 +180,16 @@ export function createApp(pool: Pool, fixtures: Fixtures, options: Options = {})
 
   if (options.staticDirectory) {
     const directory = options.staticDirectory;
-    app.use('/assets', express.static(path.join(directory, 'assets'), { index: false, immutable: true, maxAge: '1y' }));
+    const immutable = { index: false, immutable: true, maxAge: '1y' } as const;
+    app.use('/assets', express.static(path.join(directory, 'assets'), immutable));
+    if (options.previousAssetsDirectory) {
+      const servePreviousAsset = express.static(options.previousAssetsDirectory, immutable);
+      app.use('/assets', (req, res, next) => {
+        // Vite's default output uses an eight-character hash. Only serve hashed filenames from the previous release.
+        if (!/^\/[a-zA-Z0-9][a-zA-Z0-9_.-]*-[a-zA-Z0-9_-]{8}\.[a-zA-Z0-9]+$/.test(req.path)) return next();
+        return servePreviousAsset(req, res, next);
+      });
+    }
     app.use(express.static(directory, { index: false }));
     app.get('/{*path}', (req, res, next) => {
       if (path.extname(req.path) || !req.accepts('html')) {
