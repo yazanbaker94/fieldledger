@@ -13,7 +13,7 @@ sudo -u postgres createdb --owner=fieldledger fieldledger
 sudo -u fieldledger psql -d fieldledger -c 'select current_user;'
 ```
 
-From a clone on the VPS, deploy a reviewed commit. The script builds the release first, checks app health and switches back to the previous release if startup fails.
+From a clone on the VPS, deploy a reviewed commit. The script builds the release, validates its service unit, and serializes service changes with a host-local lock. It checks both the health endpoint and app page before completing. If an update fails, it restores the previous unit and release, then checks the restored service if it was running. A failed first deployment removes its service unit and release. The first successful deployment enables the service on boot. Updates start the service and preserve its existing boot configuration.
 
 ```sh
 bash deploy/native-release.sh HEAD
@@ -28,6 +28,14 @@ sudo systemctl reload caddy
 ```
 
 Add the `fieldledger` DNS record in the Cloudflare `swoop.video` zone, pointing to the VPS. Start with **DNS only** so Caddy can obtain a publicly trusted origin certificate. Verify `https://fieldledger.swoop.video/api/health` and complete a fresh timecard workflow on the public site.
+
+```sh
+curl --fail --show-error https://fieldledger.swoop.video/api/health
+curl --fail --show-error --silent --output /dev/null https://fieldledger.swoop.video/
+sudo journalctl -u fieldledger.service -n 50 --no-pager
+```
+
+To roll back a healthy deployment after a functional regression, rerun `bash deploy/native-release.sh <previous-commit>` and repeat the public checks. If automatic recovery fails, the script prints the location of the retained rollback files. Code rollback uses the existing database. Keep schema changes compatible with the previous release or plan a separate database restore before deploying them.
 
 ## Docker Compose
 

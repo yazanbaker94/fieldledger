@@ -5,10 +5,12 @@ import {
   ClipboardPenLine, HardHat, Layers3, MapPin, RotateCcw, X,
 } from 'lucide-react'
 import { api, ApiError, type Role, type Workspace } from './api'
+import { selectRetryWorkspace } from './submission-retries'
 import { ForemanView, ManagerView, WorkerView, type RunMutation } from './workspace'
 import './styles.css'
 
 type View = Role | 'welcome'
+type Route = { view: View; cardId: string | null }
 
 const roles = [
   { id: 'worker', label: 'Worker', icon: HardHat },
@@ -22,9 +24,26 @@ const steps = [
   { title: 'See the cost', detail: 'The manager sees approved labour against budget and can open the timecard behind each charge.', icon: ChartNoAxesCombined },
 ]
 
-function readView(): View {
-  const hash = window.location.hash.slice(1)
-  return roles.find((role) => role.id === hash)?.id ?? 'welcome'
+function readRoute(): Route {
+  const [path, query] = window.location.hash.slice(1).split('?', 2)
+  const view = roles.find((role) => role.id === path)?.id ?? 'welcome'
+  return { view, cardId: view === 'welcome' ? null : new URLSearchParams(query).get('card') }
+}
+
+async function openWorkspace() {
+  const controller = new AbortController()
+  const timeout = window.setTimeout(() => controller.abort(), 12000)
+  const load = () => api.workspace(controller.signal)
+  try {
+    try {
+      if (navigator.locks) return await navigator.locks.request('fieldledger-open-workspace', { signal: controller.signal }, load)
+    } catch (error) {
+      if (!(error instanceof DOMException) || error.name !== 'SecurityError') throw error
+    }
+    return await load()
+  } finally {
+    window.clearTimeout(timeout)
+  }
 }
 
 function Brand({ onHome }: { onHome: () => void }) {
@@ -98,25 +117,25 @@ function ResetDialog({ busy, onClose, onReset }: { busy: boolean; onClose: () =>
 }
 
 function App() {
-  const [view, setView] = useState<View>(readView)
+  const [{ view, cardId }, setRoute] = useState(readRoute)
   const [workspace, setWorkspace] = useState<Workspace | null>(null)
   const [loading, setLoading] = useState(false)
   const [loadError, setLoadError] = useState('')
   const [busy, setBusy] = useState(false)
   const [mutationError, setMutationError] = useState('')
-  const [notice, setNotice] = useState<{ message: string; next?: Role } | null>(null)
+  const [notice, setNotice] = useState<{ message: string; next?: Role; cardId?: string } | null>(null)
   const [resetOpen, setResetOpen] = useState(false)
-  const [revision, setRevision] = useState(0)
   const writing = useRef(false)
-  const openingWorkspace = useRef(false)
+  const activeLoad = useRef<number | null>(null)
   const fetchVersion = useRef(0)
   const workspaceRef = useRef<Workspace | null>(null)
   const main = useRef<HTMLElement>(null)
   const feedback = useRef<HTMLDivElement>(null)
 
-  const go = useCallback((target: View) => {
-    if (readView() !== target) window.location.hash = target
-    setView(target)
+  const go = useCallback((target: View, targetCardId?: string) => {
+    const hash = targetCardId ? `${target}?card=${encodeURIComponent(targetCardId)}` : target
+    if (window.location.hash !== `#${hash}`) window.location.hash = hash
+    setRoute({ view: target, cardId: targetCardId ?? null })
     setNotice(null)
     setMutationError('')
     window.scrollTo(0, 0)
@@ -124,55 +143,76 @@ function App() {
   }, [])
 
   useEffect(() => {
-    const syncView = () => setView(readView())
-    window.addEventListener('hashchange', syncView)
-    return () => window.removeEventListener('hashchange', syncView)
+    const syncRoute = () => {
+      setRoute(readRoute())
+      setNotice(null)
+      setMutationError('')
+    }
+    window.addEventListener('hashchange', syncRoute)
+    return () => window.removeEventListener('hashchange', syncRoute)
+  }, [])
+
+  const applyWorkspace = useCallback((data: Workspace) => {
+    selectRetryWorkspace(data.workspaceId)
+    workspaceRef.current = data
+    setWorkspace(data)
   }, [])
 
   const loadWorkspace = useCallback(async (showLoading = true) => {
     const isInitialLoad = workspaceRef.current === null
-    if (isInitialLoad && openingWorkspace.current) return
-    if (isInitialLoad) openingWorkspace.current = true
+    if (isInitialLoad && activeLoad.current !== null) return
     const version = ++fetchVersion.current
+    activeLoad.current = version
     if (showLoading) {
       setLoading(true)
       setLoadError('')
     }
     try {
-      const data = await api.workspace()
+      const data = await (isInitialLoad ? openWorkspace() : api.workspace())
       if (version !== fetchVersion.current) return
-      workspaceRef.current = data
-      setWorkspace(data)
+      applyWorkspace(data)
     } catch {
       if (version === fetchVersion.current && !workspaceRef.current) {
         setLoadError('We couldn’t open your demo workspace. Check your connection and try again.')
       }
     } finally {
-      if (isInitialLoad) openingWorkspace.current = false
+      if (activeLoad.current === version) activeLoad.current = null
       if (version === fetchVersion.current) setLoading(false)
     }
-  }, [])
+  }, [applyWorkspace])
 
   const inWorkspace = view !== 'welcome'
   useEffect(() => {
-    if (inWorkspace && !workspaceRef.current) void loadWorkspace()
+    if (inWorkspace) void loadWorkspace(!workspaceRef.current)
   }, [inWorkspace, loadWorkspace])
 
   useEffect(() => {
     if (!inWorkspace) return
+    let frame = 0
     const refresh = () => {
-      if (workspaceRef.current && !writing.current) void loadWorkspace(false)
+      if (frame || document.visibilityState !== 'visible') return
+      frame = requestAnimationFrame(() => {
+        frame = 0
+        if (workspaceRef.current && !writing.current) void loadWorkspace(false)
+      })
     }
     window.addEventListener('focus', refresh)
-    return () => window.removeEventListener('focus', refresh)
+    document.addEventListener('visibilitychange', refresh)
+    return () => {
+      window.removeEventListener('focus', refresh)
+      document.removeEventListener('visibilitychange', refresh)
+      cancelAnimationFrame(frame)
+    }
   }, [inWorkspace, loadWorkspace])
 
   useEffect(() => {
     if (notice || mutationError) feedback.current?.scrollIntoView({ block: 'nearest' })
+    if (notice?.next) feedback.current?.querySelector<HTMLButtonElement>('[data-handoff]')?.focus({ preventScroll: true })
   }, [notice, mutationError])
 
-  const mutate: RunMutation = async (operation, message, next) => {
+  const mutate: RunMutation = useCallback(async (operation, message, next) => {
     if (writing.current) return false
+    const startingHash = window.location.hash
     writing.current = true
     fetchVersion.current += 1
     setLoading(false)
@@ -181,26 +221,35 @@ function App() {
     setNotice(null)
     try {
       const data = await operation()
-      workspaceRef.current = data
-      setWorkspace(data)
-      setNotice({ message, next })
+      if (!data) return false
+      fetchVersion.current += 1
+      applyWorkspace(data)
+      if (window.location.hash === startingHash) setNotice({ message, next, cardId: data.affectedCardId })
       return true
     } catch (error) {
       setMutationError(error instanceof ApiError ? error.message : 'The request didn’t finish. Try again.')
-      if (error instanceof ApiError && error.status === 409) await loadWorkspace()
+      if (error instanceof ApiError && error.status === 409) {
+        const previousWorkspaceId = workspaceRef.current?.workspaceId
+        await loadWorkspace()
+        if (workspaceRef.current?.workspaceId !== previousWorkspaceId
+          && (error.code === 'workspace_changed' || error.code === 'workspace_expired')) {
+          setMutationError('The demo workspace changed. You’re now viewing the current workspace.')
+        }
+      }
       return false
     } finally {
       writing.current = false
       setBusy(false)
     }
-  }
+  }, [applyWorkspace, loadWorkspace])
 
   async function reset() {
     setResetOpen(false)
-    if (await mutate(api.reset, 'A fresh workspace is ready.')) setRevision((current) => current + 1)
+    if (workspace) await mutate(() => api.reset(workspace.workspaceId), 'A fresh workspace is ready.')
   }
 
   const pendingCount = workspace?.timecards.filter((card) => card.status === 'pending').length ?? 0
+  const roleKey = `${workspace?.workspaceId ?? ''}:${cardId ?? ''}`
 
   return (
     <>
@@ -230,7 +279,7 @@ function App() {
             {notice && (
               <div className="notice" role="status" ref={feedback}>
                 <Check size={19} /> <span>{notice.message}</span>
-                {notice.next && <button type="button" onClick={() => go(notice.next!)}>Go to {notice.next} <ArrowRight size={15} /></button>}
+                {notice.next && <button type="button" data-handoff onClick={() => go(notice.next!, notice.cardId)}>Go to {notice.next} <ArrowRight size={15} /></button>}
                 <button className="dismiss-notice" type="button" aria-label="Dismiss update" onClick={() => setNotice(null)}><X size={16} /></button>
               </div>
             )}
@@ -241,9 +290,9 @@ function App() {
                 <button className="button button-primary" type="button" onClick={() => void loadWorkspace()}>Try again <RotateCcw size={16} /></button>
               </section>
             ) : <p className="panel workspace-loading" role="status">Opening your workspace…</p>)}
-            {workspace && view === 'worker' && <WorkerView key={revision} data={workspace} busy={busy} run={mutate} go={go} />}
-            {workspace && view === 'foreman' && <ForemanView key={revision} data={workspace} busy={busy} run={mutate} go={go} />}
-            {workspace && view === 'manager' && <ManagerView key={revision} data={workspace} />}
+            {workspace && view === 'worker' && <WorkerView key={roleKey} cardId={cardId} data={workspace} busy={busy} run={mutate} go={go} />}
+            {workspace && view === 'foreman' && <ForemanView key={roleKey} cardId={cardId} data={workspace} busy={busy} run={mutate} go={go} />}
+            {workspace && view === 'manager' && <ManagerView key={roleKey} cardId={cardId} data={workspace} />}
             {resetOpen && <ResetDialog busy={busy} onClose={() => setResetOpen(false)} onReset={reset} />}
           </div>
         )}

@@ -5,7 +5,7 @@ import type { Pool } from 'pg';
 import { z } from 'zod';
 import type { Fixtures } from './db.js';
 import {
-  ApiError, cardId, decisionInput, decideCard, newWorkspace, readWorkspace, resetWorkspace,
+  ApiError, cardId, decisionInput, decideCard, newWorkspace, readWorkspace, reconcileSubmission, resetWorkspace,
   resubmitCard, resubmitInput, submitCard, submitInput,
 } from './workspace.js';
 
@@ -22,7 +22,7 @@ function validate<T>(schema: z.ZodType<T>, value: unknown): T {
     const issue = parsed.error.issues[0];
     const message = issue.path[0] === 'hours' ? 'Enter between 0.01 and 24 hours, with at most two decimal places.'
       : issue.path[0] === 'workDate' ? 'Choose a valid work date on or before today.'
-      : issue.path[0] === 'reason' ? 'Enter a return reason of 1 to 500 characters.' : 'Check the request and try again.';
+      : issue.path[0] === 'reason' ? 'Enter a return reason of 1 to 500 valid characters.' : 'Check the request and try again.';
     throw new ApiError(400, message);
   }
   return parsed.data;
@@ -30,13 +30,23 @@ function validate<T>(schema: z.ZodType<T>, value: unknown): T {
 
 function readCookie(req: Request, name: string): string | undefined {
   const raw = req.headers.cookie?.split(';').map((cookie) => cookie.trim()).find((cookie) => cookie.startsWith(`${name}=`));
-  const parsed = z.uuid().safeParse(raw?.slice(name.length + 1));
-  return parsed.success ? parsed.data : undefined;
+  const parsed = z.uuidv4().safeParse(raw?.slice(name.length + 1));
+  return parsed.success ? parsed.data.toLowerCase() : undefined;
 }
 
 function requireRole(req: Request, role: 'worker' | 'foreman') {
   // Role selection is an intentional feature of the fictional public demo.
   if (req.get('X-Demo-Role') !== role) throw new ApiError(403, `Switch to the ${role} view for this action.`);
+}
+
+function requireSameSite(req: Request) {
+  if (req.get('Sec-Fetch-Site') === 'cross-site') throw new ApiError(403, 'This request must come from the demo app.');
+}
+
+function requireWorkspace(req: Request): string {
+  const parsed = z.uuidv4().safeParse(req.get('X-Demo-Workspace'));
+  if (!parsed.success) throw new ApiError(409, 'Reload the page to use the current demo workspace.', 'workspace_required');
+  return parsed.data.toLowerCase();
 }
 
 function newSessionLimiter() {
@@ -80,10 +90,8 @@ export function createApp(pool: Pool, fixtures: Fixtures, options: Options = {})
   const api = express.Router();
   api.use((req, res, next) => {
     res.set('Cache-Control', 'no-store');
-    if (req.get('Sec-Fetch-Site') === 'cross-site' && (req.method === 'POST' || req.path === '/workspace')) {
-      throw new ApiError(403, 'This request must come from the demo app.');
-    }
     if (req.method === 'POST') {
+      requireSameSite(req);
       const origin = req.get('Origin');
       if (options.origin && origin && origin !== options.origin) {
         throw new ApiError(403, 'This request must come from the demo app.');
@@ -96,12 +104,12 @@ export function createApp(pool: Pool, fixtures: Fixtures, options: Options = {})
 
   function requireSession(req: Request) {
     const session = readCookie(req, cookieName);
-    if (!session) throw new ApiError(409, 'Start or reload the demo before changing a timecard.');
+    if (!session) throw new ApiError(409, 'Start or reload the demo before changing a timecard.', 'workspace_expired');
     return session;
   }
 
-  function setSessionCookie(res: Response, session: string, maxAge = 86_400_000) {
-    res.cookie(cookieName, session, { httpOnly: true, sameSite: 'lax', secure: options.secureCookies, path: '/', maxAge });
+  function setSessionCookie(res: Response, session: string) {
+    res.cookie(cookieName, session, { httpOnly: true, sameSite: 'lax', secure: options.secureCookies, path: '/', maxAge: 86_400_000 });
   }
 
   api.get('/health', async (_req, res) => {
@@ -115,6 +123,7 @@ export function createApp(pool: Pool, fixtures: Fixtures, options: Options = {})
 
   api.head('/workspace', (_req, res) => res.set('Allow', 'GET').sendStatus(405));
   api.get('/workspace', async (req, res) => {
+    requireSameSite(req);
     const existing = readCookie(req, cookieName);
     if (existing) {
       const workspace = await readWorkspace(pool, existing, fixtures);
@@ -124,34 +133,39 @@ export function createApp(pool: Pool, fixtures: Fixtures, options: Options = {})
       }
     }
     limitSession(req.ip ?? req.socket.remoteAddress ?? 'unknown');
-    const session = randomUUID();
+    // Never reissue a cookie for an existing browser token, even when its workspace expired.
+    const session = existing ?? randomUUID();
     const workspace = await newWorkspace(pool, session, fixtures);
-    setSessionCookie(res, session);
+    if (!existing) setSessionCookie(res, session);
+    res.json(workspace);
+  });
+
+  api.get('/timecards/submissions/:requestId', async (req, res) => {
+    requireSameSite(req);
+    const workspace = await reconcileSubmission(pool, requireSession(req), requireWorkspace(req), fixtures, validate(cardId, req.params.requestId));
     res.json(workspace);
   });
 
   api.post('/timecards', async (req, res) => {
     requireRole(req, 'worker');
-    const workspace = await submitCard(pool, requireSession(req), fixtures, validate(submitInput, req.body));
+    const workspace = await submitCard(pool, requireSession(req), requireWorkspace(req), fixtures, validate(submitInput, req.body));
     res.json(workspace);
   });
 
   api.post('/timecards/:id/resubmit', async (req, res) => {
     requireRole(req, 'worker');
-    const workspace = await resubmitCard(pool, requireSession(req), fixtures, validate(cardId, req.params.id), validate(resubmitInput, req.body));
+    const workspace = await resubmitCard(pool, requireSession(req), requireWorkspace(req), fixtures, validate(cardId, req.params.id), validate(resubmitInput, req.body));
     res.json(workspace);
   });
 
   api.post('/timecards/:id/decision', async (req, res) => {
     requireRole(req, 'foreman');
-    const workspace = await decideCard(pool, requireSession(req), fixtures, validate(cardId, req.params.id), validate(decisionInput, req.body));
+    const workspace = await decideCard(pool, requireSession(req), requireWorkspace(req), fixtures, validate(cardId, req.params.id), validate(decisionInput, req.body));
     res.json(workspace);
   });
 
   api.post('/reset', async (req, res) => {
-    const replacement = randomUUID();
-    const { workspace, expiresAt } = await resetWorkspace(pool, requireSession(req), replacement, fixtures);
-    setSessionCookie(res, replacement, Math.max(0, expiresAt.getTime() - Date.now()));
+    const workspace = await resetWorkspace(pool, requireSession(req), requireWorkspace(req), fixtures);
     res.json(workspace);
   });
 
@@ -177,7 +191,7 @@ export function createApp(pool: Pool, fixtures: Fixtures, options: Options = {})
       return;
     }
     if (error instanceof ApiError) {
-      res.status(error.status).json({ message: error.message });
+      res.status(error.status).json({ message: error.message, ...(error.code && { code: error.code }) });
       return;
     }
     if (error instanceof SyntaxError && 'type' in error && error.type === 'entity.parse.failed') {

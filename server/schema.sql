@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS labour_rates (
 
 CREATE TABLE IF NOT EXISTS demo_sessions (
   id uuid PRIMARY KEY,
+  workspace_id uuid NOT NULL DEFAULT gen_random_uuid(),
   project_id text NOT NULL REFERENCES projects (id),
   created_at timestamptz NOT NULL DEFAULT now(),
   expires_at timestamptz NOT NULL DEFAULT now() + interval '24 hours',
@@ -36,6 +37,8 @@ CREATE TABLE IF NOT EXISTS demo_sessions (
   UNIQUE (id, project_id)
 );
 
+ALTER TABLE demo_sessions ADD COLUMN IF NOT EXISTS workspace_id uuid NOT NULL DEFAULT gen_random_uuid();
+CREATE UNIQUE INDEX IF NOT EXISTS demo_sessions_workspace_id ON demo_sessions (workspace_id);
 CREATE INDEX IF NOT EXISTS demo_sessions_expiration ON demo_sessions (expires_at);
 
 CREATE TABLE IF NOT EXISTS timecards (

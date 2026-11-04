@@ -2,13 +2,13 @@
 
 FieldLedger is a working construction timecard and labour-costing demo. It follows one timecard from a worker's phone through foreman review to the project manager's budget.
 
-[Open the live demo](https://fieldledger.swoop.video/) · [Watch the walkthrough](https://github.com/yazanbaker94/fieldledger/releases/tag/v1.0.0)
+[Open the live demo](https://fieldledger.swoop.video/) · [Watch the walkthrough](https://github.com/yazanbaker94/fieldledger/releases/latest)
 
 ## Try the workflow
 
-1. As **Worker**, submit a timecard for eight hours. The project is already assigned.
-2. As **Foreman**, open the pending card. Return it with a note if it needs a correction. Switch to Worker to correct and resubmit it, then approve it as Foreman.
-3. As **Manager**, open the cost breakdown. The eight hours add CAD $400 to the CAD $9,700 already approved. The project moves to CAD $10,100 against its CAD $10,000 labour budget. Open the approved card to see its review history.
+1. As **Worker**, submit a timecard for eight hours. The project is already assigned. Select **Go to foreman** to open that card.
+2. As **Foreman**, approve the card or return it with a note. **Go to worker** opens the returned card for correction. Resubmit it and follow the card back to the foreman for approval.
+3. After approval, **Go to manager** opens the same card's cost breakdown and review history. The eight hours add CAD $400 to the CAD $9,700 already approved. The project moves to CAD $10,100 against its CAD $10,000 labour budget.
 
 Each browser gets its own demo workspace backed by PostgreSQL. Refreshing the page preserves its data during the 24-hour session. The role switcher is intentionally available to demo visitors. **Reset demo** restores that browser's starting data. The contractor, workers, rates, and project data are fictional.
 
@@ -17,6 +17,8 @@ Each browser gets its own demo workspace backed by PostgreSQL. Refreshing the pa
 | Worker on a phone | Foreman reviewing the card | Manager after approval |
 | --- | --- | --- |
 | [![Worker mobile timecard form](docs/screenshots/worker.png)](docs/screenshots/worker.png) | [![Foreman reviewing the submitted timecard](docs/screenshots/foreman.png)](docs/screenshots/foreman.png) | [![Manager viewing approved labour over budget](docs/screenshots/manager.png)](docs/screenshots/manager.png) |
+
+[See the mobile correction prompt](docs/screenshots/worker-correction.png).
 
 ## Run locally
 
@@ -36,6 +38,7 @@ For UI development, run `npm run dev:api` and `npm run dev` in separate terminal
 
 - React and TypeScript render the phone and desktop views. A TypeScript API checks input and enforces valid timecard transitions.
 - PostgreSQL stores source records, workspace state, timecards, and review events. Approval stores the applied labour rate and the exact cost, so changing a reference rate leaves earlier approvals historically accurate.
+- The server enforces a 24-hour daily limit per worker across split entries. Submission retries reuse a request ID, and the app can look up a saved card if the response was interrupted.
 - The budget view sums approved timecards in SQL. Pending labour is displayed separately. The approval, cost, and audit event commit in one transaction.
 - The prototype uses one assigned project and regular-time labour in Canadian dollars. Its budget comparison uses approved labour cost.
 
