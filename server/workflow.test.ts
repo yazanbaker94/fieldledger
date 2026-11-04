@@ -164,11 +164,44 @@ test('field timecards against PostgreSQL', async (context) => {
     assert.equal((await second('/workspace')).data.project.pendingCents, 0);
   });
 
+  await context.test('discards unsaved submissions atomically and reports any submission that already saved', async () => {
+    const client = browser();
+    const before = await client('/workspace');
+    const draft = { workDate, hours: 8, requestId: randomUUID() };
+    const receipt = `/timecards/submissions/${draft.requestId}`;
+    const worker = { role: 'worker' };
+
+    assert.equal((await client(receipt)).status, 404);
+    assert.equal((await client(`${receipt}/discard`, { role: 'foreman', body: {} })).status, 403);
+    const discarded = await client(`${receipt}/discard`, { ...worker, body: {} });
+    assert.equal(discarded.status, 200);
+    assert.equal(discarded.data.affectedCardId, undefined);
+    assert.equal(discarded.data.project.pendingCents, 0);
+    assert.equal((await client(`${receipt}/discard`, { ...worker, body: {} })).status, 200);
+    const late = await client('/timecards', { ...worker, body: draft });
+    assert.equal(late.status, 409);
+    assert.equal(late.code, 'submission_discarded');
+    assert.equal((await client(receipt)).status, 410);
+    assert.equal((await second(receipt)).status, 404);
+
+    const revised = { ...draft, hours: 7, requestId: randomUUID() };
+    const saved = await client('/timecards', { ...worker, body: revised });
+    assert.equal(saved.status, 200);
+    const alreadySaved = await client(`/timecards/submissions/${revised.requestId}/discard`, { ...worker, body: {} });
+    assert.equal(alreadySaved.status, 200);
+    assert.equal(alreadySaved.data.affectedCardId, saved.data.affectedCardId);
+    assert.equal(alreadySaved.data.project.pendingCents, 35_000);
+
+    assert.equal((await client('/reset', { body: {} })).status, 200);
+    assert.equal((await client(receipt)).status, 404);
+    assert.equal((await client('/timecards', { ...worker, workspace: before.data.workspaceId, body: draft })).code, 'workspace_changed');
+  });
+
   await context.test('returns, corrects and approves once, preserving the audit trail', async () => {
     const endpoint = `/timecards/${id}/decision`;
     assert.equal((await first(endpoint, { role: 'worker', body: { decision: 'approve', version: 1 } })).status, 403);
     assert.equal((await first(endpoint, { role: 'foreman', body: { decision: 'return', version: 1, reason: ' ' } })).status, 400);
-    for (const reason of ['invalid\u0000text', 'invalid\ud800text', 'invalid\udffftext']) {
+    for (const reason of ['invalid\u0000text', 'invalid\ud800text', 'invalid\udffftext', '\u200b\ufe0f']) {
       assert.equal((await first(endpoint, { role: 'foreman', body: { decision: 'return', version: 1, reason } })).status, 400);
     }
     const reason = 'Please confirm the recorded hours. 📝';

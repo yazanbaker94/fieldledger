@@ -46,7 +46,7 @@ export type Workspace = {
 }
 
 export class ApiError extends Error {
-  constructor(message: string, readonly status: number, readonly code?: string) {
+  constructor(message: string, readonly status: number, readonly code?: string, readonly retryAt?: number) {
     super(message)
   }
 }
@@ -83,7 +83,10 @@ async function request(path: string, { body, role, workspaceId, idempotencyKey, 
 
     if (!response.ok) {
       const error = await response.json().catch(() => null) as { message?: string; code?: string } | null
-      throw new ApiError(error?.message ?? 'The workspace is temporarily unavailable. Try again shortly.', response.status, error?.code)
+      const retryAfter = response.status === 429 ? response.headers.get('Retry-After') : null
+      const retryAt = retryAfter && (/^\d+$/.test(retryAfter) ? Date.now() + Number(retryAfter) * 1000 : Date.parse(retryAfter))
+      throw new ApiError(error?.message ?? 'The workspace is temporarily unavailable. Try again shortly.', response.status,
+        error?.code, typeof retryAt === 'number' && retryAt > Date.now() ? retryAt : undefined)
     }
     return await response.json() as Workspace
   } catch (error) {
@@ -99,11 +102,22 @@ async function recoverWrite(write: () => Promise<Workspace>, matches: (workspace
   try {
     return await write()
   } catch (error) {
-    if (error instanceof ApiError && error.status < 500) throw error
+    if (error instanceof ApiError && error.status < 500 && error.status !== 408) throw error
     const workspace = await request('/workspace', { timeout: 5000 }).catch(() => null)
     if (workspace && matches(workspace)) return { ...workspace, affectedCardId: cardId }
     throw error
   }
+}
+
+function containsDecision(workspace: Workspace, cardId: string, version: number, decision: 'approve' | 'return', reason?: string) {
+  const card = workspace.timecards.find((entry) => entry.id === cardId)
+  if (!card || card.version <= version) return false
+  const status = decision === 'approve' ? 'approved' : 'returned'
+  const note = decision === 'approve' ? null : reason?.trim()
+  if (card.version === version + 1 && card.status === status && card.decisionBy === workspace.foreman.name && card.reason === note) return true
+  // Each submitted card records its initial entry and one event for each later version.
+  const event = card.audit.length === card.version ? card.audit[version] : undefined
+  return event?.action === status && event.actor === workspace.foreman.name && event.note === note
 }
 
 export const api = {
@@ -112,6 +126,8 @@ export const api = {
     request('/timecards', { body: { workDate, hours, requestId }, role: 'worker', workspaceId }),
   findSubmission: (workspaceId: string, requestId: string) =>
     request(`/timecards/submissions/${encodeURIComponent(requestId)}`, { workspaceId, timeout: 5000 }),
+  discardSubmission: (workspaceId: string, requestId: string) =>
+    request(`/timecards/submissions/${encodeURIComponent(requestId)}/discard`, { body: {}, role: 'worker', workspaceId }),
   resubmit: (workspaceId: string, cardId: string, version: number, workDate: string, hours: number, requestId: string) =>
     request(`/timecards/${encodeURIComponent(cardId)}/resubmit`, {
       body: { workDate, hours, version },
@@ -122,9 +138,7 @@ export const api = {
   decide: (workspaceId: string, cardId: string, version: number, decision: 'approve' | 'return', reason?: string) =>
     recoverWrite(
       () => request(`/timecards/${encodeURIComponent(cardId)}/decision`, { body: { decision, reason, version }, role: 'foreman', workspaceId }),
-      (workspace) => workspace.workspaceId === workspaceId && workspace.timecards.some((card) => card.id === cardId
-        && card.version === version + 1 && card.decisionBy === workspace.foreman.name
-        && (decision === 'approve' ? card.status === 'approved' : card.status === 'returned' && card.reason === reason)),
+      (workspace) => workspace.workspaceId === workspaceId && containsDecision(workspace, cardId, version, decision, reason),
       cardId,
     ),
   reset: (workspaceId: string) => recoverWrite(

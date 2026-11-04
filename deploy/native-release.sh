@@ -41,10 +41,53 @@ wait_for_health() {
   return 1
 }
 
+preserve_failed_assets() (
+  local root assets baseline scratch file name cleanup=1
+  [[ -n "$previous_release" && -d "$release/dist/assets" ]] || exit 0
+  root=$(realpath -e -- "$app_root/releases") || exit 1
+  [[ ${previous_release%/*} == "$root" ]] || exit 1
+  assets=$previous_release/previous-assets
+  baseline=$previous_release/previous-distinct-assets
+  [[ ! -L "$assets" && ! -L "$baseline" ]] || exit 1
+  scratch=$(sudo -n mktemp -d "$previous_release/.rollback-assets.XXXXXXXX") || exit 1
+  [[ $(realpath -e -- "$scratch") == "$previous_release"/.rollback-assets.* ]] || exit 1
+  trap 'if (( cleanup )); then sudo -n rm -rf --one-file-system -- "$scratch"; fi' EXIT
+
+  # Keep the healthy fallback separately so another failed deployment can replace this one.
+  if [[ ! -d "$baseline" ]]; then
+    if [[ -d "$assets" ]]; then
+      sudo -n cp -al -- "$assets" "$scratch/baseline" || exit 1
+    else
+      sudo -n install -d -m 0755 "$scratch/baseline" || exit 1
+    fi
+    sudo -n mv -T -- "$scratch/baseline" "$baseline" || exit 1
+  fi
+  sudo -n cp -al -- "$baseline" "$scratch/combined" || exit 1
+  for file in "$release/dist/assets"/*; do
+    name=${file##*/}
+    [[ $name =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*-[a-zA-Z0-9_-]{8}\.[a-zA-Z0-9]+$ && -f "$file" && ! -L "$file" ]] || continue
+    [[ ! -e "$scratch/combined/$name" ]] || continue
+    sudo -n ln -- "$file" "$scratch/combined/$name" || exit 1
+  done
+  if [[ -d "$assets" ]]; then
+    sudo -n mv -T -- "$assets" "$scratch/original" || exit 1
+  fi
+  if ! sudo -n mv -T -- "$scratch/combined" "$assets"; then
+    if [[ -d "$scratch/original" ]] && ! sudo -n mv -T -- "$scratch/original" "$assets"; then
+      echo "Could not restore the original asset fallback from $scratch/original." >&2
+      cleanup=0
+    fi
+    exit 1
+  fi
+)
+
 restore_previous() {
   local failed=0
   if (( service_touched )); then
     sudo -n systemctl stop fieldledger.service || failed=1
+    if (( ! failed )) && ! preserve_failed_assets; then
+      echo 'Could not preserve the failed release asset fallback.' >&2
+    fi
   fi
   if (( enable_attempted )); then
     sudo -n systemctl disable fieldledger.service || failed=1
@@ -157,6 +200,9 @@ if [[ -d "$current/dist/assets" ]]; then
   previous_assets=$current/dist/assets
   if diff -qr -- "$stage/dist/assets" "$previous_assets" >/dev/null; then
     previous_assets=$current/previous-assets
+    if [[ -d "$current/previous-distinct-assets" ]]; then
+      previous_assets=$current/previous-distinct-assets
+    fi
   elif [[ $? != 1 ]]; then
     echo 'Could not compare the FieldLedger builds.' >&2
     exit 1

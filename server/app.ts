@@ -5,7 +5,7 @@ import type { Pool } from 'pg';
 import { z } from 'zod';
 import type { Fixtures } from './db.js';
 import {
-  ApiError, cardId, decisionInput, decideCard, newWorkspace, readWorkspace, reconcileSubmission, resetWorkspace,
+  ApiError, cardId, decisionInput, decideCard, discardSubmission, newWorkspace, readWorkspace, reconcileSubmission, resetWorkspace,
   resubmitCard, resubmitInput, submitCard, submitInput,
 } from './workspace.js';
 
@@ -15,6 +15,7 @@ interface Options {
   staticDirectory?: string;
   previousAssetsDirectory?: string;
   trustProxy?: number;
+  newSessionsPerHour?: number;
 }
 
 function validate<T>(schema: z.ZodType<T>, value: unknown): T {
@@ -50,28 +51,35 @@ function requireWorkspace(req: Request): string {
   return parsed.data.toLowerCase();
 }
 
-function newSessionLimiter() {
+function newSessionLimiter(maxAttempts = 30) {
   const buckets = new Map<string, { attempts: number; expires: number }>();
   let nextCleanup = 0;
+  let earliestExpiry = Number.POSITIVE_INFINITY;
   return (ip: string) => {
     const now = Date.now();
-    if (nextCleanup < now) {
-      for (const [key, bucket] of buckets) if (bucket.expires < now) buckets.delete(key);
+    const secondsUntil = (expires: number) => Math.max(1, Math.ceil((expires - now) / 1000));
+    if (nextCleanup <= now) {
+      earliestExpiry = Number.POSITIVE_INFINITY;
+      for (const [key, bucket] of buckets) {
+        if (bucket.expires <= now) buckets.delete(key);
+        else earliestExpiry = Math.min(earliestExpiry, bucket.expires);
+      }
       nextCleanup = now + 60_000;
     }
     const previous = buckets.get(ip);
-    if (!previous && buckets.size >= 4096) throw new ApiError(429, 'Too many new demo sessions. Try again later.');
-    const bucket = previous && previous.expires >= now ? previous : { attempts: 0, expires: now + 3_600_000 };
-    if (bucket.attempts >= 30) throw new ApiError(429, 'Too many new demo sessions. Try again later.');
+    if (!previous && buckets.size >= 4096) return secondsUntil(Math.max(earliestExpiry, nextCleanup));
+    const bucket = previous && previous.expires > now ? previous : { attempts: 0, expires: now + 3_600_000 };
+    if (bucket.attempts >= maxAttempts) return secondsUntil(bucket.expires);
     bucket.attempts += 1;
     buckets.set(ip, bucket);
+    earliestExpiry = Math.min(earliestExpiry, bucket.expires);
   };
 }
 
 export function createApp(pool: Pool, fixtures: Fixtures, options: Options = {}) {
   const app = express();
   const cookieName = options.secureCookies ? '__Host-fieldledger' : 'fieldledger';
-  const limitSession = newSessionLimiter();
+  const limitSession = newSessionLimiter(options.newSessionsPerHour);
   app.disable('x-powered-by');
   if (options.trustProxy) app.set('trust proxy', options.trustProxy);
 
@@ -133,7 +141,11 @@ export function createApp(pool: Pool, fixtures: Fixtures, options: Options = {})
         return;
       }
     }
-    limitSession(req.ip ?? req.socket.remoteAddress ?? 'unknown');
+    const retryAfter = limitSession(req.ip ?? req.socket.remoteAddress ?? 'unknown');
+    if (retryAfter !== undefined) {
+      res.set('Retry-After', String(retryAfter));
+      throw new ApiError(429, 'Too many new demo sessions. Try again later.');
+    }
     // Never reissue a cookie for an existing browser token, even when its workspace expired.
     const session = existing ?? randomUUID();
     const workspace = await newWorkspace(pool, session, fixtures);
@@ -144,6 +156,12 @@ export function createApp(pool: Pool, fixtures: Fixtures, options: Options = {})
   api.get('/timecards/submissions/:requestId', async (req, res) => {
     requireSameSite(req);
     const workspace = await reconcileSubmission(pool, requireSession(req), requireWorkspace(req), fixtures, validate(cardId, req.params.requestId));
+    res.json(workspace);
+  });
+
+  api.post('/timecards/submissions/:requestId/discard', async (req, res) => {
+    requireRole(req, 'worker');
+    const workspace = await discardSubmission(pool, requireSession(req), requireWorkspace(req), fixtures, validate(cardId, req.params.requestId));
     res.json(workspace);
   });
 

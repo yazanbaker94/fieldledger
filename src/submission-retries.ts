@@ -13,6 +13,8 @@ type RetryStore = { key: string; correction: boolean; current?: RetryState | nul
 const submissionStore: RetryStore = { key: 'fieldledger.submission-retries.v1', correction: false }
 const correctionStore: RetryStore = { key: 'fieldledger.correction-retries.v1', correction: true }
 const stores = [submissionStore, correctionStore]
+const sharedPrefix = 'fieldledger.shared-submission-retries.v1.'
+let selectedWorkspace: string | undefined
 
 function isAttempt(value: unknown): value is SubmissionAttempt {
   if (!value || typeof value !== 'object') return false
@@ -57,15 +59,88 @@ function inWorkspace(store: RetryStore, workspaceId: string) {
   return stored?.workspaceId === workspaceId ? stored.attempts : []
 }
 
+function parseShared(value: string | null) {
+  try {
+    const parsed: unknown = value && JSON.parse(value)
+    return Array.isArray(parsed) ? parsed.filter(isAttempt).filter((attempt) => !attempt.correction) : []
+  } catch {
+    return []
+  }
+}
+
+function submissions(workspaceId: string) {
+  const legacy = inWorkspace(submissionStore, workspaceId)
+  try {
+    const shared = parseShared(localStorage.getItem(sharedPrefix + workspaceId))
+    return [...legacy.filter((old) => !shared.some((attempt) => attempt.requestId === old.requestId)), ...shared]
+      .sort((left, right) => (left.attemptedAt ?? 0) - (right.attemptedAt ?? 0))
+  } catch {
+    return legacy
+  }
+}
+
+function writeSubmissions(workspaceId: string, attempts: SubmissionAttempt[]) {
+  try {
+    const key = sharedPrefix + workspaceId
+    if (attempts.length) localStorage.setItem(key, JSON.stringify(attempts))
+    else localStorage.removeItem(key)
+    if (read(submissionStore)?.workspaceId === workspaceId) write(submissionStore, null)
+  } catch {
+    write(submissionStore, attempts.length ? { workspaceId, attempts } : null)
+  }
+}
+
+async function withSubmissionLock<T>(workspaceId: string, change: () => T): Promise<T> {
+  if (!navigator.locks) return change()
+  const controller = new AbortController()
+  const timer = window.setTimeout(() => controller.abort(), 3000)
+  try {
+    return await navigator.locks.request(sharedPrefix + workspaceId, { signal: controller.signal }, change)
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'SecurityError') return change()
+    throw error
+  } finally {
+    window.clearTimeout(timer)
+  }
+}
+
+export function onSubmissionAttemptsChanged(workspaceId: string, changed: (removed?: SubmissionAttempt) => void) {
+  function onStorage(event: StorageEvent) {
+    if (event.key !== sharedPrefix + workspaceId) return
+    const current = parseShared(event.newValue)
+    const removed = parseShared(event.oldValue).find((attempt) => !current.some((next) => next.requestId === attempt.requestId))
+    changed(removed)
+  }
+  window.addEventListener('storage', onStorage)
+  return () => window.removeEventListener('storage', onStorage)
+}
+
 export function selectRetryWorkspace(workspaceId: string) {
+  if (selectedWorkspace === workspaceId) return
+  const previousWorkspace = selectedWorkspace
+  selectedWorkspace = workspaceId
   for (const store of stores) {
     const stored = read(store)
     if (stored && stored.workspaceId !== workspaceId) write(store, null)
   }
+  if (previousWorkspace) {
+    try {
+      localStorage.removeItem(sharedPrefix + previousWorkspace)
+    } catch {
+      // Per-tab storage still handles retries when shared storage is unavailable.
+    }
+  }
+  if (inWorkspace(submissionStore, workspaceId).length) {
+    void withSubmissionLock(workspaceId, () => {
+      if (selectedWorkspace === workspaceId && inWorkspace(submissionStore, workspaceId).length) {
+        writeSubmissions(workspaceId, submissions(workspaceId))
+      }
+    }).catch(() => {})
+  }
 }
 
 export function latestSubmissionAttempt(workspaceId: string) {
-  return inWorkspace(submissionStore, workspaceId).at(-1)
+  return submissions(workspaceId).at(-1)
 }
 
 export function latestAttempt(workspaceId: string, cardId?: string) {
@@ -77,23 +152,41 @@ export function latestAttempt(workspaceId: string, cardId?: string) {
 }
 
 export function hasAttempt(workspaceId: string, requestId: string) {
-  return stores.some((store) => inWorkspace(store, workspaceId).some((attempt) => attempt.requestId === requestId))
+  return [...submissions(workspaceId), ...inWorkspace(correctionStore, workspaceId)].some((attempt) => attempt.requestId === requestId)
 }
 
-export function rememberAttempt(workspaceId: string, workDate: string, hours: number, correction?: SubmissionAttempt['correction']) {
-  const store = correction ? correctionStore : submissionStore
-  const attempts = inWorkspace(store, workspaceId)
+export async function rememberAttempt(workspaceId: string, workDate: string, hours: number,
+  correction?: SubmissionAttempt['correction'], expectedRequestId?: string) {
+  if (!correction) {
+    return withSubmissionLock(workspaceId, () => {
+      if (selectedWorkspace !== workspaceId) return undefined
+      const attempts = submissions(workspaceId)
+      const latest = attempts.at(-1)
+      if (expectedRequestId && latest?.requestId !== expectedRequestId) return undefined
+      if (latest) return latest.workDate === workDate && latest.hours === hours ? latest : undefined
+      const attempt = { workDate, hours, requestId: crypto.randomUUID(), attemptedAt: Date.now() }
+      writeSubmissions(workspaceId, [attempt])
+      return attempt
+    })
+  }
+  const attempts = inWorkspace(correctionStore, workspaceId)
   const existing = attempts.find((attempt) => attempt.workDate === workDate && attempt.hours === hours
-    && attempt.correction?.cardId === correction?.cardId && attempt.correction?.version === correction?.version)
+    && attempt.correction?.cardId === correction.cardId && attempt.correction?.version === correction.version)
   const attempt = { workDate, hours, requestId: existing?.requestId ?? crypto.randomUUID(), correction, attemptedAt: Date.now() }
-  write(store, { workspaceId, attempts: [...attempts.filter((item) => item !== existing), attempt] })
+  write(correctionStore, { workspaceId, attempts: [...attempts.filter((item) => item !== existing), attempt] })
   return attempt
 }
 
-export function confirmAttempt(workspaceId: string, requestId: string) {
-  for (const store of stores) {
-    const previous = inWorkspace(store, workspaceId)
-    const attempts = previous.filter((item) => item.requestId !== requestId)
-    if (attempts.length !== previous.length) write(store, attempts.length ? { workspaceId, attempts } : null)
+export async function confirmAttempt(workspaceId: string, attempt: SubmissionAttempt) {
+  if (attempt.correction) {
+    const previous = inWorkspace(correctionStore, workspaceId)
+    const attempts = previous.filter((item) => item.requestId !== attempt.requestId)
+    if (attempts.length !== previous.length) write(correctionStore, attempts.length ? { workspaceId, attempts } : null)
+  } else {
+    await withSubmissionLock(workspaceId, () => {
+      const previous = submissions(workspaceId)
+      const attempts = previous.filter((item) => item.requestId !== attempt.requestId)
+      if (attempts.length !== previous.length) writeSubmissions(workspaceId, attempts)
+    }).catch(() => {})
   }
 }

@@ -2,10 +2,11 @@ import { createHash } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { z } from 'zod';
 import { type Fixtures, seedHistory, transaction } from './db.js';
+import { hasVisibleNote } from './note.js';
 
 export class ApiError extends Error {
   constructor(public readonly status: number, message: string,
-    public readonly code?: 'workspace_required' | 'workspace_changed' | 'workspace_expired') {
+    public readonly code?: 'workspace_required' | 'workspace_changed' | 'workspace_expired' | 'submission_discarded') {
     super(message);
   }
 }
@@ -31,11 +32,12 @@ export const resubmitInput = z.strictObject({ ...cardFields, version, requestId:
 export const decisionInput = z.discriminatedUnion('decision', [
   z.strictObject({ decision: z.literal('approve'), version, reason: z.literal('').optional() }),
   z.strictObject({ decision: z.literal('return'), version, reason: z.string().trim().min(1).max(500)
-    .refine((reason) => !/[\u0000\uD800-\uDFFF]/u.test(reason), 'Enter a return reason using valid text.') }),
+    .refine((reason) => hasVisibleNote(reason) && !/[\u0000\uD800-\uDFFF]/u.test(reason), 'Enter a visible return reason using valid text.') }),
 ]);
 
 const MAX_SESSIONS = 1000;
 const MAX_CARDS = 125;
+const MAX_DISCARDS = 125;
 
 interface AuditEvent {
   action: 'submitted' | 'returned' | 'resubmitted' | 'approved';
@@ -97,7 +99,7 @@ export async function readWorkspace(db: Pool | PoolClient, session: string, fixt
         SELECT json_agg(json_build_object('action', event.action, 'actor', actor.name, 'at', event.occurred_at, 'note', event.note,
           'workDate', to_char(event.work_date, 'YYYY-MM-DD'), 'hours', event.hours,
           'previousWorkDate', to_char(event.previous_work_date, 'YYYY-MM-DD'), 'previousHours', event.previous_hours)
-          ORDER BY event.occurred_at, event.id) AS events
+           ORDER BY event.id) AS events
         FROM audit_events event JOIN people actor ON actor.id = event.actor_id
         WHERE event.timecard_id = card.id
       ) history ON true
@@ -224,12 +226,46 @@ async function lookupSubmission(client: PoolClient, session: string, workspace: 
   return result.rows[0];
 }
 
+async function isSubmissionDiscarded(client: PoolClient, session: string, workspace: string, requestId: string) {
+  const result = await client.query(`
+    SELECT 1 FROM discarded_timecard_submissions WHERE session_id = $1 AND workspace_id = $2 AND request_id = $3
+  `, [session, workspace, requestId]);
+  return result.rowCount === 1;
+}
+
 export function reconcileSubmission(pool: Pool, session: string, workspace: string, fixtures: Fixtures, requestId: string) {
   return transaction(pool, async (client) => {
     await lockWorkspace(client, session, workspace, fixtures.project.id);
     const existing = await lookupSubmission(client, session, workspace, requestId);
-    if (!existing) throw new ApiError(404, 'This submission has not been recorded.');
+    if (!existing) {
+      if (await isSubmissionDiscarded(client, session, workspace, requestId)) {
+        throw new ApiError(410, 'This unsaved submission was discarded.', 'submission_discarded');
+      }
+      throw new ApiError(404, 'This submission has not been recorded.');
+    }
     return { ...await writtenWorkspace(client, session, fixtures), affectedCardId: existing.id };
+  });
+}
+
+export function discardSubmission(pool: Pool, session: string, workspace: string, fixtures: Fixtures, requestId: string) {
+  return transaction(pool, async (client) => {
+    await lockWorkspace(client, session, workspace, fixtures.project.id);
+    await verifyAssignment(client, fixtures.project.id, fixtures.worker.id, 'worker');
+    const existing = await lookupSubmission(client, session, workspace, requestId);
+    if (existing) {
+      if (existing.kind !== 'submission') throw new ApiError(409, 'This request ID belongs to a timecard correction.');
+      return { ...await writtenWorkspace(client, session, fixtures), affectedCardId: existing.id };
+    }
+    if (!await isSubmissionDiscarded(client, session, workspace, requestId)) {
+      const inserted = await client.query(`
+        INSERT INTO discarded_timecard_submissions (session_id, workspace_id, request_id)
+        SELECT $1, $2, $3 WHERE (
+          SELECT count(*) FROM discarded_timecard_submissions WHERE session_id = $1 AND workspace_id = $2
+        ) < $4
+      `, [session, workspace, requestId, MAX_DISCARDS]);
+      if (inserted.rowCount !== 1) throw new ApiError(409, 'This session has reached its discard limit. Reset the demo to start again.');
+    }
+    return writtenWorkspace(client, session, fixtures);
   });
 }
 
@@ -244,6 +280,9 @@ export function submitCard(pool: Pool, session: string, workspace: string, fixtu
         throw new ApiError(409, 'This request ID is already used by a different timecard submission.');
       }
       return existing.id;
+    }
+    if (await isSubmissionDiscarded(client, session, workspace, input.requestId)) {
+      throw new ApiError(409, 'This unsaved submission was discarded.', 'submission_discarded');
     }
     const count = await client.query<{ count: number }>('SELECT count(*)::integer FROM timecards WHERE session_id = $1', [session]);
     if (count.rows[0].count >= MAX_CARDS) throw new ApiError(409, 'This session is full. Reset the demo to start again.');
@@ -342,6 +381,7 @@ export function resetWorkspace(pool: Pool, session: string, workspace: string, f
     // Keep the secret cookie stable while invalidating the generation on every old request.
     await client.query('UPDATE demo_sessions SET workspace_id = gen_random_uuid(), last_reset_at = now() WHERE id = $1', [session]);
     await client.query('DELETE FROM timecards WHERE session_id = $1', [session]);
+    await client.query('DELETE FROM discarded_timecard_submissions WHERE session_id = $1', [session]);
     await seedHistory(client, session, fixtures);
     return writtenWorkspace(client, session, fixtures);
   });

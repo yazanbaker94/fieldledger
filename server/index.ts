@@ -33,6 +33,7 @@ try {
     staticDirectory: fileURLToPath(new URL('../dist/', import.meta.url)),
     previousAssetsDirectory,
     trustProxy,
+    newSessionsPerHour: process.env.NODE_ENV === 'test' ? 100 : undefined,
   });
   const cleanup = setInterval(() => {
     void pool.query('DELETE FROM demo_sessions WHERE expires_at <= now()').catch((error) => console.error('Demo cleanup error', error.message));

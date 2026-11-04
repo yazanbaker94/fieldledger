@@ -118,3 +118,10 @@ CREATE TABLE IF NOT EXISTS timecard_correction_receipts (
 );
 
 CREATE INDEX IF NOT EXISTS correction_receipts_by_timecard ON timecard_correction_receipts (timecard_id);
+
+CREATE TABLE IF NOT EXISTS discarded_timecard_submissions (
+  session_id uuid NOT NULL REFERENCES demo_sessions (id) ON DELETE CASCADE,
+  workspace_id uuid NOT NULL,
+  request_id uuid NOT NULL,
+  PRIMARY KEY (session_id, workspace_id, request_id)
+);

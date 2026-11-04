@@ -22,6 +22,10 @@ case ${0##*/} in
     if [[ $* == 'run build' ]]; then
       mkdir -p dist/assets node_modules
       printf 'compiled %s\n' "$BUILD_ASSET" > "dist/assets/index-$BUILD_ASSET.js"
+      printf 'style %s\n' "$BUILD_ASSET" > "dist/assets/index-$BUILD_ASSET.css"
+      printf 'private build metadata\n' > "dist/assets/debug_$BUILD_ASSET.txt"
+      printf '<script src="/assets/index-%s.js"></script>\n<link href="/assets/index-%s.css" rel="stylesheet">\n' \
+        "$BUILD_ASSET" "$BUILD_ASSET" > dist/index.html
     fi
     ;;
   systemd-analyze) [[ $FAIL_PHASE != validation ]] ;;
@@ -51,9 +55,29 @@ case ${0##*/} in
     esac
     ;;
   curl)
-    if [[ $FAIL_PHASE == page && ${*: -1} == http://127.0.0.1:3088/ ]]; then
-      ! grep -q 'candidate' "$TEST_UNIT"
-    fi
+    url=${*: -1}
+    case $url in
+      */api/health)
+        if [[ $FAIL_PHASE == health ]] && grep -q 'candidate' "$TEST_UNIT"; then
+          "$0" http://127.0.0.1:3088/ > "$TEST_STATE/browser.html"
+          exit 22
+        fi
+        ;;
+      */assets/*)
+        asset=${url##*/}
+        if [[ -f "$TEST_APP/current/dist/assets/$asset" ]]; then
+          cat "$TEST_APP/current/dist/assets/$asset"
+        elif [[ -f "$TEST_APP/current/previous-assets/$asset" ]]; then
+          cat "$TEST_APP/current/previous-assets/$asset"
+        else
+          exit 22
+        fi
+        ;;
+      */)
+        if [[ $FAIL_PHASE == page ]] && grep -q 'candidate' "$TEST_UNIT"; then exit 22; fi
+        cat "$TEST_APP/current/dist/index.html"
+        ;;
+    esac
     ;;
   *) exit 99 ;;
 esac
@@ -120,15 +144,41 @@ cmp "$repeat/dist/assets/index-second00.js" "$TEST_APP/current/previous-assets/i
 [[ ! -e "$TEST_APP/current/previous-assets/index-first000.js" ]]
 previous=$(readlink "$TEST_APP/current")
 printf '[Unit]\nDescription=previous\n' > "$TEST_UNIT"
-for phase in validation restart page; do
-  expect_failure update "$phase"
+previous_failed=''
+for phase in validation restart page health; do
+  case $phase in
+    validation) failed_asset=badbuild ;;
+    restart) failed_asset=restart0 ;;
+    page) failed_asset=badpage0 ;;
+    health) failed_asset=badhlth0 ;;
+  esac
+  expect_failure update "$phase" "$failed_asset"
   [[ $(readlink "$TEST_APP/current") == "$previous" ]]
   grep -q 'Description=previous' "$TEST_UNIT"
   cmp "$repeat/dist/assets/index-second00.js" "$TEST_APP/current/previous-assets/index-second00.js"
-  [[ ! -e "$TEST_APP/current/previous-assets/index-failed000.js" ]]
+  if [[ $phase == validation ]]; then
+    [[ ! -e "$TEST_APP/current/previous-assets/index-$failed_asset.js" ]]
+  else
+    printf 'compiled %s\n' "$failed_asset" | cmp - "$TEST_APP/current/previous-assets/index-$failed_asset.js"
+    printf 'style %s\n' "$failed_asset" | cmp - "$TEST_APP/current/previous-assets/index-$failed_asset.css"
+    [[ ! -e "$TEST_APP/current/previous-assets/debug_$failed_asset.txt" ]]
+    if [[ -n "$previous_failed" ]]; then
+      [[ ! -e "$TEST_APP/current/previous-assets/index-$previous_failed.js" ]]
+    fi
+    previous_failed=$failed_asset
+  fi
   [[ -f "$TEST_STATE/active" && ! -e "$TEST_STATE/enabled" ]]
   [[ $(find "$TEST_APP/releases" -mindepth 1 -maxdepth 1 -type d | wc -l) -eq 3 ]]
 done
+
+grep -q '/assets/index-badhlth0.js' "$TEST_STATE/browser.html"
+grep -q '/assets/index-badhlth0.css' "$TEST_STATE/browser.html"
+"$bin/curl" http://127.0.0.1:3088/ | grep -q '/assets/index-third000.js'
+"$bin/curl" http://127.0.0.1:3088/assets/index-badhlth0.js | cmp - "$TEST_APP/current/previous-assets/index-badhlth0.js"
+"$bin/curl" http://127.0.0.1:3088/assets/index-badhlth0.css | cmp - "$TEST_APP/current/previous-assets/index-badhlth0.css"
+run_release update none third000
+printf 'compiled second00\n' | cmp - "$TEST_APP/current/previous-assets/index-second00.js"
+[[ ! -e "$TEST_APP/current/previous-assets/index-badhlth0.js" ]]
 
 for phase in restart enable; do
   expect_failure "first-$phase" "$phase"
