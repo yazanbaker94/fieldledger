@@ -132,6 +132,7 @@ function App() {
   const main = useRef<HTMLElement>(null)
   const feedback = useRef<HTMLDivElement>(null)
   const resetTrigger = useRef<HTMLButtonElement>(null)
+  const resetFocusRoute = useRef<string | null>(null)
 
   const go = useCallback((target: View, targetCardId?: string) => {
     const hash = targetCardId ? `${target}?card=${encodeURIComponent(targetCardId)}` : target
@@ -211,6 +212,14 @@ function App() {
     if (notice?.next) feedback.current?.querySelector<HTMLButtonElement>('[data-handoff]')?.focus({ preventScroll: true })
   }, [notice, mutationError])
 
+  useEffect(() => {
+    if (busy || resetFocusRoute.current === null) return
+    if (resetFocusRoute.current === window.location.hash && document.activeElement === document.body) {
+      resetTrigger.current?.focus()
+    }
+    resetFocusRoute.current = null
+  }, [busy])
+
   const mutate: RunMutation = useCallback(async (operation, message, next) => {
     if (writing.current) return false
     const startingHash = window.location.hash
@@ -248,6 +257,7 @@ function App() {
   }, [applyWorkspace, loadWorkspace])
 
   async function reset() {
+    resetFocusRoute.current = window.location.hash
     setResetOpen(false)
     if (workspace) await mutate(() => api.reset(workspace.workspaceId), 'A fresh workspace is ready.')
   }

@@ -14,6 +14,7 @@ current=$app_root/current
 previous_unit=''
 release=''
 previous=''
+previous_release=''
 changes_started=0
 service_touched=0
 was_active=0
@@ -66,6 +67,23 @@ restore_previous() {
   return "$failed"
 }
 
+prune_releases() {
+  local root active candidate name resolved failed=0
+  [[ ! -L "$app_root/releases" ]] || return 1
+  root=$(realpath -e -- "$app_root/releases") || return 1
+  active=$(realpath -e -- "$current") || return 1
+  [[ $active == "$root/${release##*/}" ]] || return 1
+  for candidate in "$root"/*; do
+    name=${candidate##*/}
+    [[ $name =~ ^([0-9a-f]{40}|[0-9a-f]{64})\.[a-zA-Z0-9]{8}$ && -d "$candidate" && ! -L "$candidate" ]] || continue
+    resolved=$(realpath -e -- "$candidate") || return 1
+    [[ $resolved == "$root/$name" ]] || continue
+    [[ $resolved != "$active" && $resolved != "$previous_release" ]] || continue
+    sudo -n rm -rf --one-file-system -- "$resolved" || failed=1
+  done
+  return "$failed"
+}
+
 finish() {
   local status=$? recovered=1
   trap - EXIT
@@ -80,6 +98,9 @@ finish() {
   fi
   if (( status != 0 && recovered )) && [[ -n "$release" ]]; then
     sudo -n rm -rf -- "$release" || echo "Could not remove failed release $release." >&2
+  fi
+  if (( status == 0 )); then
+    prune_releases || echo 'Could not clean up all older FieldLedger releases.' >&2
   fi
   if (( recovered )); then
     rm -rf -- "$stage" || true
@@ -115,6 +136,7 @@ if [[ -e "$current" || -L "$current" ]]; then
     echo 'The current FieldLedger release or service unit is missing. Repair it before deploying.' >&2
     exit 1
   fi
+  previous_release=$(realpath -e -- "$current")
 fi
 if [[ -f "$unit" ]]; then
   recovery=$(mktemp -d "$stage/rollback.XXXXXXXX")
@@ -132,8 +154,16 @@ fi
 release=$(sudo -n mktemp -d "$app_root/releases/$revision.XXXXXXXX")
 sudo -n cp -a --no-preserve=ownership "$stage"/{dist,node_modules,server,package.json,tsconfig.json} "$release/"
 if [[ -d "$current/dist/assets" ]]; then
-  # Snapshot only the previous live build. Rollback switches its asset fallback with the release.
-  sudo -n cp -al -- "$current/dist/assets" "$release/previous-assets"
+  previous_assets=$current/dist/assets
+  if diff -qr -- "$stage/dist/assets" "$previous_assets" >/dev/null; then
+    previous_assets=$current/previous-assets
+  elif [[ $? != 1 ]]; then
+    echo 'Could not compare the FieldLedger builds.' >&2
+    exit 1
+  fi
+  if [[ -d "$previous_assets" ]]; then
+    sudo -n cp -al -- "$previous_assets" "$release/previous-assets"
+  fi
 fi
 sudo -n chmod 0755 "$release"
 changes_started=1

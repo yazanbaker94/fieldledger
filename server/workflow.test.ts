@@ -275,6 +275,50 @@ test('field timecards against PostgreSQL', async (context) => {
     assert.equal((await pool.query('SELECT 1 FROM timecard_correction_receipts WHERE request_id = $1', [correctionId])).rowCount, 0);
   });
 
+  await context.test('recovers the last legacy return and reserves the final revision for approval', async () => {
+    const client = browser();
+    await client('/workspace');
+    const created = await client('/timecards', { role: 'worker', body: { workDate, hours: 8, requestId: randomUUID() } });
+    const cardId = created.data.affectedCardId;
+    assert.ok(cardId);
+    const decision = `/timecards/${cardId}/decision`;
+    const resubmit = `/timecards/${cardId}/resubmit`;
+    const card = (workspace: Workspace) => workspace.timecards.find((entry) => entry.id === cardId);
+    const returnCard = (version: number) => client(decision, { role: 'foreman', body: { decision: 'return', version, reason: 'Confirm the duration' } });
+    const correctCard = (version: number) => client(resubmit, { role: 'worker', body: { workDate, hours: 8, version, requestId: randomUUID() } });
+
+    for (let version = 1; version < 23; version += 2) {
+      assert.equal((await returnCard(version)).status, 200);
+      assert.equal((await correctCard(version + 1)).status, 200);
+    }
+    assert.equal(card((await client('/workspace')).data)?.canReturn, true);
+    // Recreate the old constraint around a return that the previous API left at version 24.
+    await pool.query(`ALTER TABLE timecards DROP CONSTRAINT timecards_revision_limit,
+      ADD CONSTRAINT timecards_version_check CHECK (version BETWEEN 1 AND 25)`);
+    assert.equal(card((await returnCard(23)).data)?.version, 24);
+    await prepareDatabase(pool);
+    await prepareDatabase(pool);
+
+    const corrected = await correctCard(24);
+    assert.equal(corrected.status, 200);
+    assert.equal(card(corrected.data)?.version, 25);
+    assert.equal(card(corrected.data)?.canReturn, false);
+    assert.equal((await returnCard(25)).status, 409);
+    assert.deepEqual(card((await client('/workspace')).data), card(corrected.data));
+    // The migrated database also protects the final slot if older code tries to return the card.
+    await assert.rejects(pool.query(`UPDATE timecards SET status = 'returned', version = 26, decision_at = now(),
+      decision_by = $2, reason = 'Another correction' WHERE id = $1`, [cardId, fixtures.foreman.id]),
+    { constraint: 'timecards_revision_limit' });
+
+    const approval = { role: 'foreman', body: { decision: 'approve', version: 25 } };
+    const approved = await client(decision, approval);
+    assert.equal(approved.status, 200);
+    assert.equal(approved.data.project.approvedCents, 1_010_000);
+    assert.equal(card(approved.data)?.version, 26);
+    assert.equal(card(approved.data)?.audit.length, 26);
+    assert.deepEqual((await client(decision, approval)).data, approved.data);
+  });
+
   await context.test('rolls back correction and audit when the receipt cannot be recorded', async (subtest) => {
     const client = browser();
     await client('/workspace');

@@ -49,7 +49,7 @@ CREATE TABLE IF NOT EXISTS timecards (
   work_date date NOT NULL,
   hours numeric(4, 2) NOT NULL CHECK (hours > 0 AND hours <= 24),
   status text NOT NULL CHECK (status IN ('pending', 'returned', 'approved')),
-  version integer NOT NULL DEFAULT 1 CHECK (version BETWEEN 1 AND 25),
+  version integer NOT NULL DEFAULT 1,
   submitted_at timestamptz NOT NULL DEFAULT now(),
   decision_at timestamptz,
   decision_by text,
@@ -75,6 +75,17 @@ CREATE TABLE IF NOT EXISTS timecards (
       AND approved_cost_cents = round(hours * approved_rate_cents) AND approved_cost_cents IS NOT NULL)
   )
 );
+
+-- Version 26 gives legacy returns at version 24 room to be corrected and approved.
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conrelid = 'timecards'::regclass AND conname = 'timecards_revision_limit'
+  ) THEN
+    ALTER TABLE timecards
+      DROP CONSTRAINT IF EXISTS timecards_version_check,
+      ADD CONSTRAINT timecards_revision_limit CHECK (version BETWEEN 1 AND 26 AND (version < 26 OR status = 'approved'));
+  END IF;
+END $$;
 
 CREATE INDEX IF NOT EXISTS timecards_by_session ON timecards (session_id, work_date DESC);
 

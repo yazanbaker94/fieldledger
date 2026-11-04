@@ -4,7 +4,7 @@ import {
   CircleAlert, ClipboardCheck, ClipboardList, Clock3, CornerUpLeft, FileText, MapPin,
 } from 'lucide-react'
 import { api, ApiError, type Role, type Timecard, type Workspace } from './api'
-import { confirmAttempt, hasAttempt, latestAttempt, rememberAttempt, type SubmissionAttempt } from './submission-retries'
+import { confirmAttempt, hasAttempt, latestAttempt, latestSubmissionAttempt, rememberAttempt, type SubmissionAttempt } from './submission-retries'
 
 export type RunMutation = (operation: () => Promise<Workspace | null>, message: string, next?: Role) => Promise<boolean>
 
@@ -106,6 +106,13 @@ function TimecardForm({ data, busy, run, editing, currentCard, closeEdit, retryD
   const stale = currentCard?.status === 'returned' && currentCard.version !== version
   const note = currentCard?.reason ?? editing?.reason
   const matchingRetry = retryDraft?.workDate === date && retryDraft.hours === Number(hours) ? retryDraft : undefined
+  const changedSubmission = !editing && Boolean(retryDraft && !matchingRetry)
+
+  function restoreSubmission(attempt: SubmissionAttempt) {
+    setDate(attempt.workDate)
+    setHours(String(attempt.hours))
+    requestAnimationFrame(() => dateField.current?.focus())
+  }
 
   function reviewLatest() {
     if (!currentCard || currentCard.status !== 'returned') return
@@ -122,10 +129,12 @@ function TimecardForm({ data, busy, run, editing, currentCard, closeEdit, retryD
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (busy || stale || unavailable) return
+    if (busy || stale || unavailable || changedSubmission) return
     const enteredHours = Number(hours)
     const workspaceId = data.workspaceId
     const correction = editing && version !== undefined ? { cardId: editing.id, version } : undefined
+    const unconfirmed = correction ? undefined : latestSubmissionAttempt(workspaceId)
+    if (unconfirmed && (unconfirmed.workDate !== date || unconfirmed.hours !== enteredHours)) return
     const attempt = rememberAttempt(workspaceId, date, enteredHours, correction)
     const { requestId } = attempt
     const saved = await run(async () => {
@@ -184,11 +193,20 @@ function TimecardForm({ data, busy, run, editing, currentCard, closeEdit, retryD
           </div>
           <p className="field-help">Log regular hours worked on this project.</p>
           {previousDraft && <p className="field-help">Previous draft: {previousDraft.hours ? `${previousDraft.hours} hrs` : 'Hours unset'}{previousDraft.date && ` · ${workDate(previousDraft.date)}`}</p>}
-          {matchingRetry && <p className="field-help retry-help">{editing ? 'An earlier correction is still unconfirmed.' : 'An earlier submission is still unconfirmed.'}{!stale && !unavailable && ' Submit these same details to check or finish saving it.'}</p>}
+          {retryDraft && !editing && (
+            <div className="draft-conflict" role="status">
+              <strong>An earlier submission is still unconfirmed.</strong>
+              <p>Original entry: {retryDraft.hours} hrs · {workDate(retryDraft.workDate)}</p>
+              <p>{changedSubmission ? 'Check whether it saved or restore the original details before retrying.' : 'Check whether it saved or retry with these details.'}</p>
+              <button className="text-button" type="button" onClick={() => checkRetry(retryDraft)} disabled={busy}>Check saved submission <ArrowRight size={15} /></button>
+              {changedSubmission && <button className="text-button" type="button" onClick={() => restoreSubmission(retryDraft)} disabled={busy}>Restore original details <ArrowRight size={15} /></button>}
+            </div>
+          )}
+          {matchingRetry?.correction && <p className="field-help retry-help">An earlier correction is still unconfirmed.{!stale && !unavailable && ' Submit these same details to check or finish saving it.'}</p>}
           <div className="form-actions">
             {matchingRetry?.correction && (stale || unavailable) && <button className="button button-secondary" type="button" onClick={() => checkRetry(matchingRetry)} disabled={busy}>Check saved correction</button>}
             {editing && <button className="button button-secondary" type="button" onClick={closeEdit} disabled={busy}>Cancel</button>}
-            <button className="button button-primary" type="submit" disabled={busy || stale || unavailable}>
+            <button className="button button-primary" type="submit" disabled={busy || stale || unavailable || changedSubmission}>
               {busy ? 'Saving…' : editing ? 'Resubmit timecard' : 'Submit timecard'} <ArrowRight size={17} />
             </button>
           </div>
@@ -273,23 +291,29 @@ function focusLedger(ledger: HTMLElement | null, cardId?: string) {
 
 export function WorkerView({ cardId, data, busy, run, go }: ViewProps) {
   const ownCards = data.timecards.filter((card) => card.workerName === data.worker.name)
+  const linkedCard = ownCards.find((card) => card.id === cardId)
   const [opening] = useState(() => {
-    const target = ownCards.find((card) => card.id === cardId && card.status === 'returned')
-    const attempt = latestAttempt(data.workspaceId, target?.id)
+    const attempt = latestAttempt(data.workspaceId, cardId ?? undefined) ?? latestSubmissionAttempt(data.workspaceId)
     const retryCard = ownCards.find((card) => card.id === attempt?.correction?.cardId)
-    return { editor: target ?? retryCard ?? null, attempt }
+    return { editor: linkedCard?.status === 'returned' ? linkedCard : retryCard ?? null, attempt }
   })
   const [editing, setEditing] = useState(opening.editor)
   const [openId, setOpenId] = useState<string | null>(null)
-  const [retryDraft, setRetryDraft] = useState(opening.attempt)
+  const [correctionRetry, setCorrectionRetry] = useState(() => opening.attempt?.correction ? opening.attempt : undefined)
+  const [submissionRetry, setSubmissionRetry] = useState(() => latestSubmissionAttempt(data.workspaceId))
   const formArea = useRef<HTMLDivElement>(null)
   const currentCard = ownCards.find((card) => card.id === editing?.id)
-  const pendingDraft = retryDraft && hasAttempt(data.workspaceId, retryDraft.requestId) ? retryDraft : undefined
-  const formRetry = editing
-    ? pendingDraft?.correction?.cardId === editing.id ? pendingDraft : undefined
-    : pendingDraft?.correction ? undefined : pendingDraft
+  const retryDraft = editing
+    ? correctionRetry?.correction?.cardId === editing.id ? correctionRetry : undefined
+    : submissionRetry
+  const formRetry = retryDraft && hasAttempt(data.workspaceId, retryDraft.requestId) ? retryDraft : undefined
   const sortedCards = [...ownCards].sort((first, second) => Number(second.status === 'returned') - Number(first.status === 'returned'))
   const primaryCorrection = sortedCards.find((card) => card.status === 'returned')
+
+  const updateRetryDraft = useCallback((attempt: SubmissionAttempt | undefined, requestId: string) => {
+    setCorrectionRetry((draft) => attempt?.correction ? attempt : draft?.requestId === requestId ? undefined : draft)
+    setSubmissionRetry(latestSubmissionAttempt(data.workspaceId))
+  }, [data.workspaceId])
 
   const recover = useCallback(async (attempt: SubmissionAttempt, showError = false) => {
     const { requestId, correction } = attempt
@@ -301,38 +325,40 @@ export function WorkerView({ cardId, data, busy, run, go }: ViewProps) {
         return result
       } catch (error) {
         if (error instanceof ApiError && error.status === 409) throw error
-        if (showError) throw new ApiError('We couldn’t confirm that this correction was saved.', 400)
+        if (showError) throw new ApiError(correction
+          ? 'We couldn’t confirm that this correction was saved.'
+          : 'We couldn’t confirm that this submission was saved. Retry with the original details.', 400)
         return null
       }
     }, correction ? 'Recovered your resubmitted timecard.' : 'Recovered your submitted timecard.', 'foreman')
 
     if (saved) {
-      setRetryDraft((draft) => draft?.requestId === requestId ? undefined : draft)
+      updateRetryDraft(undefined, requestId)
       if (correction) setEditing((editor) => editor?.id === correction.cardId ? null : editor)
     }
-  }, [data.workspaceId, run])
+  }, [data.workspaceId, run, updateRetryDraft])
 
   useEffect(() => {
     if (opening.attempt && hasAttempt(data.workspaceId, opening.attempt.requestId)) void recover(opening.attempt)
   }, [data.workspaceId, opening, recover])
 
   useEffect(() => {
-    const checkCorrection = () => {
+    const checkPending = () => {
       if (document.visibilityState !== 'visible') return
-      const attempt = latestAttempt(data.workspaceId, editing?.id)
-      if (attempt?.correction) void recover(attempt)
+      const attempt = latestAttempt(data.workspaceId, cardId ?? editing?.id) ?? latestSubmissionAttempt(data.workspaceId)
+      if (attempt) void recover(attempt)
     }
-    window.addEventListener('focus', checkCorrection)
-    document.addEventListener('visibilitychange', checkCorrection)
+    window.addEventListener('focus', checkPending)
+    document.addEventListener('visibilitychange', checkPending)
     return () => {
-      window.removeEventListener('focus', checkCorrection)
-      document.removeEventListener('visibilitychange', checkCorrection)
+      window.removeEventListener('focus', checkPending)
+      document.removeEventListener('visibilitychange', checkPending)
     }
-  }, [data.workspaceId, editing?.id, recover])
+  }, [cardId, data.workspaceId, editing?.id, recover])
 
   function edit(card: Timecard) {
     setEditing(card)
-    setRetryDraft(latestAttempt(data.workspaceId, card.id))
+    setCorrectionRetry(latestAttempt(data.workspaceId, card.id))
     requestAnimationFrame(() => {
       formArea.current?.scrollIntoView({ block: 'nearest' })
       formArea.current?.querySelector<HTMLInputElement>('#work-date')?.focus({ preventScroll: true })
@@ -345,7 +371,7 @@ export function WorkerView({ cardId, data, busy, run, go }: ViewProps) {
       if (editing && document.activeElement === document.body) {
         const trigger = document.querySelector<HTMLButtonElement>(`[data-correct-card="${CSS.escape(editing.id)}"]`)
         if (trigger) trigger.focus()
-        else formArea.current?.querySelector<HTMLInputElement>('#work-date')?.focus()
+        else formArea.current?.querySelector<HTMLElement>('[data-open-timecard-form], #work-date')?.focus()
       }
     })
   }
@@ -355,17 +381,31 @@ export function WorkerView({ cardId, data, busy, run, go }: ViewProps) {
       <PageTitle role="worker" title="Log a timecard" description="Record a shift and follow its status from submission to approval." data={data} />
       <div className="content-grid worker-grid">
         <div className="view-stack" ref={formArea}>
-          {primaryCorrection && !editing && (
+          {primaryCorrection && !editing && !cardId && (
             <aside className="correction-action" aria-labelledby="correction-title">
               <span className="step-icon"><CornerUpLeft size={20} /></span>
               <div><h2 id="correction-title">Action needed</h2><p><strong>{workDate(primaryCorrection.workDate)}</strong> · {primaryCorrection.reason}</p></div>
               <button className="text-button" type="button" data-correct-card={primaryCorrection.id} onClick={() => edit(primaryCorrection)} disabled={busy}>Correct and resubmit <ArrowUpRight size={14} /></button>
             </aside>
           )}
-          <TimecardForm key={editing?.id ?? 'new'} data={data} busy={busy} run={run} editing={editing} currentCard={currentCard} closeEdit={closeEdit} retryDraft={formRetry}
-            setRetryDraft={(attempt, requestId) => setRetryDraft((draft) => attempt ?? (draft?.requestId === requestId ? undefined : draft))}
-            checkRetry={(attempt) => void recover(attempt, true)} />
-          <aside className="next-step"><span className="step-icon"><ClipboardCheck size={20} /></span><div><h3>What happens next?</h3><p>Your foreman sees the timecard in their review queue.</p></div><button className="text-button" type="button" onClick={() => go('foreman')}>Open foreman view <ArrowUpRight size={15} /></button></aside>
+          {cardId && !editing ? (
+            <section className="panel log-panel" aria-label="Linked timecard">
+              <PanelTitle icon={<FileText size={20} />} title="Linked timecard" />
+              <div className="panel-body">
+                {linkedCard ? <><CardSummary card={linkedCard} showCost={false} /><Audit card={linkedCard} /></>
+                  : <p role="status">This timecard is unavailable in your current workspace.</p>}
+                <div className="form-actions">
+                  {linkedCard?.status === 'returned' && <button className="button button-secondary" type="button" data-correct-card={linkedCard.id} onClick={() => edit(linkedCard)} disabled={busy}>Correct and resubmit</button>}
+                  <button className="button button-primary" type="button" data-open-timecard-form onClick={() => go('worker')} disabled={busy}>Open new timecard form <ArrowRight size={17} /></button>
+                </div>
+              </div>
+            </section>
+          ) : (
+            <TimecardForm key={editing?.id ?? 'new'} data={data} busy={busy} run={run} editing={editing} currentCard={currentCard} closeEdit={closeEdit} retryDraft={formRetry}
+              setRetryDraft={updateRetryDraft}
+              checkRetry={(attempt) => void recover(attempt, true)} />
+          )}
+          {!cardId && <aside className="next-step"><span className="step-icon"><ClipboardCheck size={20} /></span><div><h3>What happens next?</h3><p>Your foreman sees the timecard in their review queue.</p></div><button className="text-button" type="button" onClick={() => go('foreman')}>Open foreman view <ArrowUpRight size={15} /></button></aside>}
         </div>
         <section className="panel" aria-label="My timecards">
           <PanelTitle icon={<Clock3 size={20} />} title="My timecards"><span className="count-pill">{ownCards.length}</span></PanelTitle>
@@ -373,7 +413,7 @@ export function WorkerView({ cardId, data, busy, run, go }: ViewProps) {
             {sortedCards.map((card) => (
               <div className="card-list-item" key={card.id}>
                 <CardRow card={card} selected={openId === card.id} onClick={() => setOpenId((previous) => previous === card.id ? null : card.id)} />
-                {card.status === 'returned' && card.id !== primaryCorrection?.id && <div className="row-correction"><p>{card.reason}</p><button className="text-button" type="button" data-correct-card={card.id} onClick={() => edit(card)} disabled={busy || editing?.id === card.id}>Correct and resubmit <ArrowUpRight size={14} /></button></div>}
+                {!cardId && card.status === 'returned' && card.id !== primaryCorrection?.id && <div className="row-correction"><p>{card.reason}</p><button className="text-button" type="button" data-correct-card={card.id} onClick={() => edit(card)} disabled={busy || editing?.id === card.id}>Correct and resubmit <ArrowUpRight size={14} /></button></div>}
                 {openId === card.id && <div className="inline-details"><Audit card={card} /></div>}
               </div>
             ))}
@@ -384,7 +424,8 @@ export function WorkerView({ cardId, data, busy, run, go }: ViewProps) {
   )
 }
 
-function ForemanDecision({ workspaceId, card, busy, run, pin, complete }: { workspaceId: string; card: Timecard; busy: boolean; run: RunMutation; pin: () => void; complete: () => void }) {
+function ForemanDecision({ workspaceId, card, busy, run, complete }: { workspaceId: string; card: Timecard; busy: boolean; run: RunMutation; complete: () => void }) {
+  const [reviewedVersion, setReviewedVersion] = useState(card.version)
   const [returnVersion, setReturnVersion] = useState<number | null>(null)
   const [reason, setReason] = useState('')
   const note = useRef<HTMLTextAreaElement>(null)
@@ -392,7 +433,8 @@ function ForemanDecision({ workspaceId, card, busy, run, pin, complete }: { work
   const restoringFocus = useRef(false)
   const returning = returnVersion !== null
   const pending = card.status === 'pending'
-  const stale = returning && returnVersion !== card.version
+  const canReturn = card.canReturn !== false
+  const stale = (returnVersion ?? reviewedVersion) !== card.version
 
   useEffect(() => {
     if (returning) note.current?.focus()
@@ -404,15 +446,21 @@ function ForemanDecision({ workspaceId, card, busy, run, pin, complete }: { work
 
   async function decide(decision: 'approve' | 'return') {
     const isApproval = decision === 'approve'
-    const version = isApproval ? card.version : returnVersion
-    if (busy || !pending || version === null || (!isApproval && stale)) return
-    pin()
+    const version = isApproval ? reviewedVersion : returnVersion
+    if (busy || !pending || version !== card.version || (!isApproval && !canReturn)) return
     if (await run(() => api.decide(workspaceId, card.id, version, decision, isApproval ? undefined : reason.trim()),
       isApproval ? 'Timecard approved.' : 'Timecard returned to the worker.', isApproval ? 'manager' : 'worker')) {
       setReturnVersion(null)
       setReason('')
       complete()
     }
+  }
+
+  function reviewLatest(event: MouseEvent<HTMLButtonElement>) {
+    const detail = event.currentTarget.closest<HTMLElement>('#timecard-review')
+    setReviewedVersion(card.version)
+    if (returning) setReturnVersion(card.version)
+    requestAnimationFrame(() => (returning ? note.current : detail)?.focus())
   }
 
   function cancel() {
@@ -432,30 +480,39 @@ function ForemanDecision({ workspaceId, card, busy, run, pin, complete }: { work
         <div className="draft-conflict" role="alert">
           <strong>Timecard changed while you were writing this note.</strong>
           <p>Review the latest hours and work date above. Your note is still in the form below.</p>
-          <button className="text-button" type="button" onClick={() => { setReturnVersion(card.version); requestAnimationFrame(() => note.current?.focus()) }} disabled={busy}>Review latest timecard <ArrowRight size={15} /></button>
+          <button className="text-button" type="button" onClick={reviewLatest} disabled={busy}>Review latest timecard <ArrowRight size={15} /></button>
         </div>
       )}
       <label htmlFor="correction-note">Correction note</label>
-      <textarea ref={note} id="correction-note" value={reason} onChange={(event) => setReason(event.target.value)} required maxLength={300} rows={3} placeholder="Tell the worker what to change…" disabled={busy} readOnly={!pending || stale} />
+      <textarea ref={note} id="correction-note" value={reason} onChange={(event) => setReason(event.target.value)} required maxLength={300} rows={3} placeholder="Tell the worker what to change…" disabled={busy} readOnly={!pending || stale || !canReturn} />
+      {pending && !canReturn && <p className="field-help">This timecard has reached its correction limit. It can still be approved.</p>}
       <div className="form-actions">
         <button className="button button-secondary" type="button" onClick={cancel} disabled={busy}>Cancel</button>
-        <button className="button button-primary" type="submit" disabled={busy || !pending || stale || !reason.trim()}><CornerUpLeft size={16} /> Send back to worker</button>
+        <button className="button button-primary" type="submit" disabled={busy || !pending || stale || !canReturn || !reason.trim()}><CornerUpLeft size={16} /> Send back to worker</button>
       </div>
     </form>
   ) : (
-    <div className="form-actions decision-actions">
-      <button ref={returnButton} className="button button-secondary" type="button" onClick={() => { pin(); setReturnVersion(card.version) }} disabled={busy}><CornerUpLeft size={16} /> Return with a note</button>
-      <button className="button button-primary" type="button" onClick={() => void decide('approve')} disabled={busy}><Check size={17} /> Approve timecard</button>
-    </div>
+    <>
+      {stale && <div className="draft-conflict review-conflict" role="alert">
+        <strong>Timecard changed during your review.</strong>
+        <p>Check the latest hours and work date above before making a decision.</p>
+        <button className="text-button" type="button" onClick={reviewLatest} disabled={busy}>Review latest timecard <ArrowRight size={15} /></button>
+      </div>}
+      {!canReturn && <p className="read-only-detail">This timecard has reached its correction limit. It can still be approved.</p>}
+      <div className="form-actions decision-actions">
+        {canReturn && <button ref={returnButton} className="button button-secondary" type="button" onClick={() => setReturnVersion(reviewedVersion)} disabled={busy || stale}><CornerUpLeft size={16} /> Return with a note</button>}
+        <button className="button button-primary" type="button" onClick={() => void decide('approve')} disabled={busy || stale}><Check size={17} /> Approve timecard</button>
+      </div>
+    </>
   )
 }
 
 export function ForemanView({ cardId, data, busy, run, go }: ViewProps) {
   const [filter, setFilter] = useState<'pending' | 'all'>(() => data.timecards.some((card) => card.id === cardId && card.status !== 'pending') ? 'all' : 'pending')
-  const [selectedId, setSelectedId] = useState(cardId)
   const pending = data.timecards.filter((card) => card.status === 'pending')
+  const [selectedId, setSelectedId] = useState(() => cardId ?? pending[0]?.id ?? null)
   const shown = filter === 'pending' ? pending : data.timecards
-  const selected = selectedId ? data.timecards.find((card) => card.id === selectedId) : shown[0]
+  const selected = data.timecards.find((card) => card.id === selectedId)
   const review = useRef<HTMLElement>(null)
   const queue = useRef<HTMLElement>(null)
 
@@ -494,7 +551,7 @@ export function ForemanView({ cardId, data, busy, run, go }: ViewProps) {
           </PanelTitle>
           {selected ? <div className="panel-body">
             <CardSummary card={selected} showCost />
-            <ForemanDecision key={selected.id} workspaceId={data.workspaceId} card={selected} busy={busy} run={run} pin={() => setSelectedId(selected.id)} complete={() => setFilter('all')} />
+            <ForemanDecision key={selected.id} workspaceId={data.workspaceId} card={selected} busy={busy} run={run} complete={() => setFilter('all')} />
             <Audit card={selected} />
           </div> : selectedId
             ? <Empty title="Selected timecard unavailable" text="Choose another timecard from the review queue." />
@@ -505,7 +562,7 @@ export function ForemanView({ cardId, data, busy, run, go }: ViewProps) {
   )
 }
 
-function Budget({ project }: { project: Workspace['project'] }) {
+function Budget({ project, openTimecard }: { project: Workspace['project']; openTimecard?: () => void }) {
   const balance = project.budgetCents - project.approvedCents
   const overBudget = balance < 0
   const used = project.budgetCents ? project.approvedCents / project.budgetCents * 100 : 0
@@ -525,6 +582,7 @@ function Budget({ project }: { project: Workspace['project'] }) {
         <div><strong>{percentage}% of labour budget used</strong><span className={overBudget ? 'over-amount' : ''}>{money(Math.abs(balance))} {overBudget ? 'over budget' : 'remaining'}</span></div>
         <progress className={overBudget ? 'over-progress' : ''} max={100} value={Math.min(used, 100)} aria-label={`${percentage}% of labour budget used`} />
       </div>
+      {openTimecard && <button className="budget-handoff" type="button" aria-controls="cost-details" onClick={openTimecard}>View approved timecard <ArrowDown size={15} /></button>}
     </section>
   )
 }
@@ -546,7 +604,7 @@ export function ManagerView({ data, cardId }: { data: Workspace; cardId: string 
   return (
     <section aria-labelledby="manager-title">
       <PageTitle role="manager" title="Labour budget" description="Compare approved hours against the project’s labour budget and open the timecards behind the total." data={data} />
-      <Budget project={data.project} />
+      <Budget project={data.project} openTimecard={cardId && selected?.id === cardId && selected.status === 'approved' ? () => focusDetails(detail.current) : undefined} />
       <div className="content-grid manager-grid">
         <section className="panel" aria-label="Timecard ledger" ref={ledger} tabIndex={-1}>
           <PanelTitle icon={<ClipboardList size={20} />} title="Timecard ledger"><span className="count-pill">CAD</span></PanelTitle>

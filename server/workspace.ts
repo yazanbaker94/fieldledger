@@ -21,7 +21,10 @@ const cardFields = {
   hours: z.number().min(0.01).max(24).multipleOf(0.01, 'Enter hours with at most two decimal places.'),
 };
 
-const version = z.int().min(1).max(25);
+const MAX_VERSION = 26;
+// A return must leave room for both a correction and an approval.
+const MAX_RETURN_VERSION = MAX_VERSION - 3;
+const version = z.int().min(1).max(MAX_VERSION);
 export const cardId = z.uuid().transform((id) => id.toLowerCase());
 export const submitInput = z.strictObject({ ...cardFields, requestId: cardId });
 export const resubmitInput = z.strictObject({ ...cardFields, version, requestId: cardId.optional() });
@@ -52,6 +55,7 @@ interface Timecard {
   hours: number;
   status: 'pending' | 'returned' | 'approved';
   version: number;
+  canReturn: boolean;
   submittedAt: string;
   decisionAt: string | null;
   decisionBy: string | null;
@@ -75,7 +79,8 @@ export async function readWorkspace(db: Pool | PoolClient, session: string, fixt
   const result = await db.query<{ workspace: Workspace }>(`
     WITH visible_cards AS (
       SELECT card.id, worker.name AS "workerName", to_char(card.work_date, 'YYYY-MM-DD') AS "workDate", card.hours,
-        card.status, card.version, card.submitted_at AS "submittedAt", card.decision_at AS "decisionAt",
+        card.status, card.version, (card.status = 'pending' AND card.version <= $5) AS "canReturn",
+        card.submitted_at AS "submittedAt", card.decision_at AS "decisionAt",
         reviewer.name AS "decisionBy", card.reason,
         COALESCE(card.approved_rate_cents, rate.rate_cents) AS "rateCents",
         COALESCE(card.approved_cost_cents, round(card.hours * rate.rate_cents)::integer) AS "costCents",
@@ -116,7 +121,7 @@ export async function readWorkspace(db: Pool | PoolClient, session: string, fixt
     JOIN people foreman ON foreman.id = $3
     JOIN people manager ON manager.id = $4
     WHERE session.id = $1 AND session.expires_at > now()
-  `, [session, fixtures.worker.id, fixtures.foreman.id, fixtures.manager.id]);
+  `, [session, fixtures.worker.id, fixtures.foreman.id, fixtures.manager.id, MAX_RETURN_VERSION]);
   return result.rows[0]?.workspace;
 }
 
@@ -284,7 +289,7 @@ export function resubmitCard(pool: Pool, session: string, workspace: string, fix
       return id;
     }
     if (card.version !== input.version || card.status !== 'returned') throw new ApiError(409, 'This timecard has changed. Refresh before resubmitting.');
-    if (card.version >= 24) throw new ApiError(409, 'This timecard reached its revision limit. Start a new timecard.');
+    if (card.version >= MAX_VERSION - 1) throw new ApiError(409, 'This timecard reached its revision limit. Start a new timecard.');
     await getRate(client, project.id, worker.id, input.workDate);
     await verifyDailyHours(client, session, project.id, worker.id, input.workDate, input.hours, id);
     const updated = await client.query(`
@@ -314,6 +319,9 @@ export function decideCard(pool: Pool, session: string, workspace: string, fixtu
     const reason = input.decision === 'return' ? input.reason : null;
     if (card.version === input.version + 1 && card.status === status && card.decision_by === foreman.id && card.reason === reason) return id;
     if (card.version !== input.version || card.status !== 'pending') throw new ApiError(409, 'This timecard has changed. Refresh before making a decision.');
+    if (status === 'returned' && card.version > MAX_RETURN_VERSION) {
+      throw new ApiError(409, 'This timecard has reached its correction limit and can only be approved.');
+    }
     const rate = input.decision === 'approve' ? await getRate(client, project.id, card.worker_id, card.work_date) : null;
     if (rate !== null) await verifyDailyHours(client, session, project.id, card.worker_id, card.work_date, card.hours, id, 'approved');
     const updated = await client.query(`

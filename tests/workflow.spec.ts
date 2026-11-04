@@ -263,7 +263,6 @@ test("a saved submission is recovered on reload even from an old correction link
   const initial = await initialResponse.json() as { timecards: { id: string; hours: number; status: string }[] };
   const earlier = initial.timecards.find(card => card.status === "pending" && card.hours === 6);
   expect(earlier).toBeDefined();
-  await page.goto("/#worker?card=" + earlier!.id);
   let writeStatus = 0;
   await page.route("**/api/timecards", async route => {
     const saved = await route.fetch();
@@ -271,11 +270,15 @@ test("a saved submission is recovered on reload even from an old correction link
     await route.abort();
   }, { times: 1 });
 
+  await page.getByLabel("Hours worked").fill("8");
   await page.getByRole("button", { name: "Submit timecard" }).click();
   await expect(page.getByRole("alert")).toContainText("The request didn’t finish");
   expect(writeStatus).toBe(200);
+  await page.evaluate(id => history.replaceState(null, "", "#worker?card=" + id), earlier!.id);
   await page.reload();
   await expect(page.getByText("Recovered your submitted timecard.", { exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Linked timecard" })).toContainText("6 hrs");
+  await expect(page.getByRole("button", { name: "Submit timecard" })).toHaveCount(0);
   await page.getByRole("button", { name: "Go to foreman" }).click();
   await expect(page.getByRole("region", { name: "Timecard review" })).toContainText("8 hrs");
 
@@ -500,4 +503,97 @@ test("desktop keyboard review offers a direct path to and from details and resto
   await page.keyboard.press("Escape");
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect(reset).toBeFocused();
+});
+
+test("an open foreman review keeps its card and requires review of revised hours", async ({ page, context }) => {
+  await enterDemo(page);
+  await submitTimecard(page, 7);
+  await role(page, "Foreman").click();
+  const review = page.getByRole("region", { name: "Timecard review" });
+  const approve = review.getByRole("button", { name: "Approve timecard" });
+  const queue = page.getByRole("region", { name: "Review queue" });
+  await expect(review.getByText("7 hrs", { exact: true })).toBeVisible();
+  const originalId = await queue.getByRole("button", { name: /View timecard for.*7 hrs/ }).getAttribute("data-card-id");
+
+  const other = await context.newPage();
+  await other.goto("/#worker");
+  await submitTimecard(other, 5);
+  await refreshFromAnotherTab(page);
+  await expect(queue.getByRole("button", { name: /View timecard for.*5 hrs/ })).toBeVisible();
+  await expect(review.getByText("7 hrs", { exact: true })).toBeVisible();
+  await approve.focus();
+
+  await other.goto(`/#foreman?card=${originalId}`);
+  await returnCurrentTimecard(other, "Include one more hour.");
+  await other.getByRole("button", { name: "Go to worker" }).click();
+  await other.getByLabel("Hours worked").fill("8");
+  await other.getByRole("button", { name: "Resubmit timecard" }).click();
+  await expect(other.getByText("Timecard resubmitted for review.", { exact: true })).toBeVisible();
+  await refreshFromAnotherTab(page);
+
+  await expect(review.getByText("8 hrs", { exact: true })).toBeVisible();
+  await expect(approve).toBeDisabled();
+  await review.getByRole("button", { name: "Review latest timecard" }).click();
+  await approve.click();
+  await page.getByRole("button", { name: "Go to manager" }).click();
+  await expect(page.locator("#approved-total")).toHaveText("$10,100");
+  await expect(page).toHaveURL(new RegExp(`card=${originalId}$`));
+});
+
+test("the narrow budget fits cents and links directly to the approved timecard", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 750 });
+  await enterDemo(page);
+  await submitTimecard(page, 8.01);
+  await page.getByRole("button", { name: "Go to foreman" }).click();
+  await page.getByRole("button", { name: "Approve timecard" }).click();
+  await page.getByRole("button", { name: "Go to manager" }).click();
+
+  const approved = page.locator("#approved-total");
+  await expect(approved).toHaveText("$10,100.50");
+  expect(await approved.evaluate((amount) => amount.scrollWidth <= amount.clientWidth)).toBe(true);
+  const jump = page.getByRole("button", { name: "View approved timecard" });
+  await expect(jump).toBeInViewport();
+  await jump.press("Enter");
+  const detail = page.getByRole("region", { name: "Cost details" });
+  await expect(detail).toBeFocused();
+  await expect(detail.getByText("8.01 hrs × $50/hr", { exact: true })).toBeInViewport();
+});
+
+test("a stalled submission times out across roles and unlocks the workspace", async ({ page }) => {
+  await page.clock.install();
+  await enterDemo(page);
+  await page.route("**/api/timecards", () => {});
+  await page.getByRole("button", { name: "Submit timecard" }).click();
+  await expect(page.getByRole("button", { name: "Saving…" })).toBeDisabled();
+  await role(page, "Manager").click();
+  const reset = page.getByRole("button", { name: "Reset demo" });
+  await expect(reset).toBeDisabled();
+  await page.clock.fastForward(10_001);
+  await expect(page.getByRole("alert")).toContainText("The connection timed out.");
+  await expect(reset).toBeEnabled();
+  await expect(page.locator("#approved-total")).toHaveText("$9,700");
+});
+
+test("lost approval and reset responses reconcile and keyboard reset restores focus", async ({ page }) => {
+  await enterDemo(page);
+  await submitTimecard(page, 8);
+  await page.getByRole("button", { name: "Go to foreman" }).click();
+  await page.route("**/api/timecards/*/decision", async (route) => {
+    await route.fetch();
+    await route.abort();
+  }, { times: 1 });
+  await page.getByRole("button", { name: "Approve timecard" }).click();
+  await page.getByRole("button", { name: "Go to manager" }).click();
+  await expect(page.locator("#approved-total")).toHaveText("$10,100");
+
+  await page.route("**/api/reset", async (route) => {
+    await route.fetch();
+    await route.abort();
+  }, { times: 1 });
+  const reset = page.getByRole("button", { name: "Reset demo" });
+  await reset.press("Enter");
+  await page.getByRole("button", { name: "Reset workspace" }).press("Enter");
+  await expect(page.getByText("A fresh workspace is ready.", { exact: true })).toBeVisible();
+  await expect(reset).toBeFocused();
+  await expect(page.locator("#approved-total")).toHaveText("$9,700");
 });

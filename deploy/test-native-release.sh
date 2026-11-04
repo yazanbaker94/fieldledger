@@ -104,10 +104,19 @@ run_release update none second00
 [[ -f "$TEST_STATE/active" && -f "$TEST_STATE/enabled" ]]
 cmp "$first/dist/assets/index-first000.js" "$TEST_APP/current/previous-assets/index-first000.js"
 second=$(readlink "$TEST_APP/current")
+run_release update none second00
+repeat=$(readlink "$TEST_APP/current")
+[[ -d "$second" && ! -e "$first" ]]
+printf 'compiled first000\n' | cmp - "$repeat/previous-assets/index-first000.js"
+[[ ! -e "$repeat/previous-assets/index-second00.js" ]]
+mkdir -p "$TEST_STATE/untouched" "$TEST_APP/releases/manual-backup"
+ln -s "$TEST_STATE/untouched" "$first"
 rm "$TEST_STATE/active" "$TEST_STATE/enabled"
 run_release update none third000
 [[ -f "$TEST_STATE/active" && ! -e "$TEST_STATE/enabled" ]]
-cmp "$second/dist/assets/index-second00.js" "$TEST_APP/current/previous-assets/index-second00.js"
+[[ ! -e "$second" && -d "$repeat" ]]
+[[ -L "$first" && -d "$TEST_STATE/untouched" && -d "$TEST_APP/releases/manual-backup" ]]
+cmp "$repeat/dist/assets/index-second00.js" "$TEST_APP/current/previous-assets/index-second00.js"
 [[ ! -e "$TEST_APP/current/previous-assets/index-first000.js" ]]
 previous=$(readlink "$TEST_APP/current")
 printf '[Unit]\nDescription=previous\n' > "$TEST_UNIT"
@@ -115,7 +124,7 @@ for phase in validation restart page; do
   expect_failure update "$phase"
   [[ $(readlink "$TEST_APP/current") == "$previous" ]]
   grep -q 'Description=previous' "$TEST_UNIT"
-  cmp "$second/dist/assets/index-second00.js" "$TEST_APP/current/previous-assets/index-second00.js"
+  cmp "$repeat/dist/assets/index-second00.js" "$TEST_APP/current/previous-assets/index-second00.js"
   [[ ! -e "$TEST_APP/current/previous-assets/index-failed000.js" ]]
   [[ -f "$TEST_STATE/active" && ! -e "$TEST_STATE/enabled" ]]
   [[ $(find "$TEST_APP/releases" -mindepth 1 -maxdepth 1 -type d | wc -l) -eq 3 ]]

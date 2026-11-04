@@ -8,7 +8,7 @@ FieldLedger is a working construction timecard and labour-costing demo. It follo
 
 1. As **Worker**, submit a timecard for eight hours. The project is already assigned. Select **Go to foreman** to open that card.
 2. As **Foreman**, approve the card or return it with a note. **Go to worker** opens the returned card for correction. Resubmit it and follow the card back to the foreman for approval.
-3. After approval, **Go to manager** opens the same card's cost breakdown and review history. The eight hours add CAD $400 to the CAD $9,700 already approved. The project moves to CAD $10,100 against its CAD $10,000 labour budget.
+3. After approval, **Go to manager** shows the updated budget. **View approved timecard** jumps to that card’s cost breakdown and review history. The eight hours add CAD $400 to the CAD $9,700 already approved. The project moves to CAD $10,100 against its CAD $10,000 labour budget.
 
 Each browser gets its own demo workspace backed by PostgreSQL. Refreshing the page preserves its data during the 24-hour session. The role switcher is intentionally available to demo visitors. **Reset demo** restores that browser's starting data. The contractor, workers, rates, and project data are fictional.
 
@@ -38,7 +38,8 @@ For UI development, run `npm run dev:api` and `npm run dev` in separate terminal
 
 - React and TypeScript render the phone and desktop views. A TypeScript API checks input and enforces valid timecard transitions.
 - PostgreSQL stores source records, workspace state, timecards, and review events. Approval stores the applied labour rate and the exact cost, so changing a reference rate leaves earlier approvals historically accurate.
-- The server enforces a 24-hour daily limit per worker across split entries. Submission and correction retries reuse a request ID, and the app can look up a saved card if the response was interrupted.
+- The server enforces a 24-hour daily limit per worker across split entries. If a submission is interrupted, the original entry stays visible while the app checks whether it saved. Retrying the original entry reuses its request ID.
+- Foreman review stays on the selected card across refreshes. A changed revision requires an explicit review before approval. A Worker handoff link continues to show the same card after correction.
 - Audit history records the hours and work date on new submissions and preserves both values when a card is corrected.
 - CSV fixtures supply initial reference values. Once imported, PostgreSQL rates determine the cost of both newly seeded history and new timecards using each work date.
 - The budget view sums approved timecards in SQL. Pending labour is displayed separately. The approval, cost, and audit event commit in one transaction.

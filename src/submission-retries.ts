@@ -64,11 +64,15 @@ export function selectRetryWorkspace(workspaceId: string) {
   }
 }
 
+export function latestSubmissionAttempt(workspaceId: string) {
+  return inWorkspace(submissionStore, workspaceId).at(-1)
+}
+
 export function latestAttempt(workspaceId: string, cardId?: string) {
   const corrections = inWorkspace(correctionStore, workspaceId)
   if (cardId) return corrections.filter((attempt) => attempt.correction?.cardId === cardId).at(-1)
   const correction = corrections.at(-1)
-  const submission = inWorkspace(submissionStore, workspaceId).at(-1)
+  const submission = latestSubmissionAttempt(workspaceId)
   return correction && (!submission || (correction.attemptedAt ?? 0) >= (submission.attemptedAt ?? 0)) ? correction : submission
 }
 
