@@ -619,6 +619,7 @@ function Budget({ project, openTimecard, costsStale }: { project: Workspace['pro
         <div><p className="eyebrow"><span className="signal-dot" /> {costsStale ? 'Last saved project costs' : 'Live project costs'}</p><h2>{project.name}</h2><p><MapPin size={15} /> {project.location} <span className="budget-divider" /> {project.code}</p></div>
         <span className={`budget-state${overBudget ? ' budget-state-over' : ''}`}>{overBudget ? <CircleAlert size={16} /> : <Check size={16} />} {overBudget ? 'Over budget' : 'Within budget'}</span>
       </div>
+      {openTimecard && <button className="budget-handoff" type="button" aria-controls="cost-details" onClick={openTimecard}>View approved timecard <ArrowDown size={15} /></button>}
       <div className="budget-metrics">
         <div><span>Approved labour</span><output id="approved-total" aria-label="Approved labour">{money(project.approvedCents)}</output></div>
         <div><span>Labour budget</span><strong>{money(project.budgetCents)}</strong></div>
@@ -628,7 +629,6 @@ function Budget({ project, openTimecard, costsStale }: { project: Workspace['pro
         <div><strong>{percentage}% of labour budget used</strong><span className={overBudget ? 'over-amount' : ''}>{money(Math.abs(balance))} {overBudget ? 'over budget' : 'remaining'}</span></div>
         <progress className={overBudget ? 'over-progress' : ''} max={100} value={Math.min(used, 100)} aria-hidden="true" />
       </div>
-      {openTimecard && <button className="budget-handoff" type="button" aria-controls="cost-details" onClick={openTimecard}>View approved timecard <ArrowDown size={15} /></button>}
     </section>
   )
 }

@@ -314,13 +314,16 @@ svg { display: block; flex-shrink: 0; }
   .workspace-heading { display: grid; gap: 10px; margin-bottom: 16px; }
   .workspace-heading p:not(.eyebrow) { font-size: .84rem; }
   .persona { justify-self: start; padding: 4px 7px 4px 4px; }
-  .avatar { width: 29px; height: 29px; }
-  .panel-heading { min-height: 50px; padding: 12px 13px; }
+  .avatar { width: max(29px, 1.65em); height: max(29px, 1.65em); flex-shrink: 0; }
+  .panel-heading { min-height: 50px; padding: 12px 13px; flex-wrap: wrap; }
+  .panel-heading > div, .card-summary-header > div { min-width: 0; overflow-wrap: anywhere; }
+  .detail-back { max-width: 100%; overflow-wrap: anywhere; }
   .panel-body { padding: 13px; }
   .form-fields { grid-template-columns: repeat(auto-fit, minmax(min(100%, 7.8rem), 1fr)); }
   .card-list { padding-inline: 5px; }
   .card-row { gap: 7px; padding-inline: 6px; }
   .card-row-icon { width: 30px; height: 30px; }
+  .card-summary-header { flex-wrap: wrap; }
   .card-facts.has-cost { grid-template-columns: repeat(auto-fit, minmax(min(100%, 4.7rem), 1fr)); }
   .row-correction, .inline-details { padding-left: 43px; }
   .notice, .error-message { margin-top: -5px; }
