@@ -432,13 +432,14 @@ function App() {
     if (notice?.next) feedback.current?.querySelector<HTMLButtonElement>('[data-handoff]')?.focus({ preventScroll: true })
   }, [notice, mutationError])
 
-  useEffect(() => {
-    if (busy || resetFocusRoute.current === null) return
-    if (resetFocusRoute.current === window.location.hash && document.activeElement === document.body) {
-      resetTrigger.current?.focus()
-    }
+  useLayoutEffect(() => {
+    const route = resetFocusRoute.current
+    if (route === null) return
+    const trigger = resetTrigger.current
+    if (route === window.location.hash && trigger?.disabled !== false) return
     resetFocusRoute.current = null
-  }, [busy])
+    if (route === window.location.hash && document.activeElement === document.body) trigger?.focus()
+  }, [busy, transition, writeRefreshRequired, workspaceId, view, cardId])
 
   useLayoutEffect(() => {
     const button = refreshFocus.current
