@@ -2,7 +2,13 @@
 
 FieldLedger is a working construction timecard and labour-costing demo. It follows one timecard from a worker's phone through foreman review to the project manager's budget.
 
-[Open the live demo](https://fieldledger.swoop.video/) · [Watch the v1.0.7 workflow walkthrough](https://github.com/yazanbaker94/fieldledger/releases/tag/v1.0.7)
+[Open the live demo](https://fieldledger.swoop.video/) · [Full workflow walkthrough](https://github.com/yazanbaker94/fieldledger/releases/tag/v1.0.7)
+
+## 15-second website walkthrough
+
+Maya corrects and resubmits her timecard. When the foreman approves it, CAD $400 posts to the ledger and approved labour crosses the CAD $10,000 budget.
+
+https://github.com/user-attachments/assets/47c1b8f1-1224-4546-8629-7f1635041f72
 
 ## Try the workflow
 
