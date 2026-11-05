@@ -10,6 +10,12 @@ Maya corrects and resubmits her timecard. When the foreman approves it, CAD $400
 
 https://github.com/user-attachments/assets/47c1b8f1-1224-4546-8629-7f1635041f72
 
+## 15-second Android walkthrough
+
+Recorded in the native Android app, from timecard submission through correction, approval, and the budget update.
+
+https://github.com/user-attachments/assets/36d4fe32-0960-44e5-9444-46aa815f1c0b
+
 ## Try the workflow
 
 1. As **Worker**, choose **Use 7 hours** in the correction walkthrough, then submit the timecard. Select **Go to foreman** to open that card.
