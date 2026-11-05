@@ -572,6 +572,7 @@ test("an open foreman review keeps its card and requires review of revised hours
 
 test("the narrow budget fits cents and links directly to the approved timecard", async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 750 });
+  await page.emulateMedia({ reducedMotion: "reduce" });
   await enterDemo(page);
   await submitTimecard(page, 8.01);
   await page.getByRole("button", { name: "Go to foreman" }).click();
@@ -587,6 +588,40 @@ test("the narrow budget fits cents and links directly to the approved timecard",
   const detail = page.getByRole("region", { name: "Cost details" });
   await expect(detail).toBeFocused();
   await expect(detail.getByText("8.01 hrs × $50/hr", { exact: true })).toBeInViewport();
+});
+
+test("the Cost Trail plays a verified posting once and keeps older entries separate from the current total", async ({ page }) => {
+  await enterDemo(page);
+  await submitTimecard(page, 8);
+  await page.getByRole("button", { name: "Go to foreman" }).click();
+  await page.getByRole("button", { name: "Approve timecard" }).click();
+  const handoff = page.getByRole("button", { name: "Go to manager" });
+  await expect(handoff).toBeVisible();
+
+  await page.clock.install();
+  await page.clock.pauseAt(new Date(Date.now() + 250));
+  await handoff.click({ force: true });
+  const budget = page.getByRole("region", { name: "Project labour budget" });
+  const total = page.locator("#approved-total");
+  await expect(budget).toHaveAttribute("data-stage", "incoming");
+  await expect(total).toHaveText("$9,700");
+  await page.clock.runFor(925);
+  await expect(budget).toHaveAttribute("data-stage", "threshold");
+  await expect(total).toHaveText("$10,000");
+  await expect(budget.getByText("At budget", { exact: true })).toBeVisible();
+  await page.clock.runFor(400);
+  await expect(budget).toHaveAttribute("data-stage", "settled");
+  await expect(total).toHaveText("$10,100");
+  await expect(budget.getByText("$100 over budget", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Approve timecard" })).toHaveCount(0);
+
+  const ledger = page.getByRole("region", { name: "Timecard ledger" });
+  await ledger.getByRole("button", { name: /View timecard for.*2 hrs/ }).click();
+  await expect(total).toHaveText("$10,100");
+  await expect(budget.getByText("Before posting", { exact: true })).toBeVisible();
+  await expect(budget.getByText("$0", { exact: true }).last()).toBeVisible();
+  await expect(budget.getByText("$100", { exact: true })).toBeVisible();
+  await expect(budget).toHaveAttribute("data-stage", "settled");
 });
 
 test("a stalled submission times out across roles and unlocks the workspace", async ({ page }) => {

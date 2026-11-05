@@ -4,15 +4,19 @@ import {
   ArrowDownRight, ArrowRight, ArrowUpRight, ChartNoAxesCombined, Check, ClipboardCheck,
   ClipboardPenLine, HardHat, Layers3, MapPin, RotateCcw, X,
 } from 'lucide-react'
-import { api, ApiError, type Role, type Workspace } from './api'
+import { api, ApiError, type ApprovalPosting, type Role, type Workspace } from './api'
 import { selectRetryWorkspace } from './submission-retries'
 import { beginWorkspaceReset, onWorkspaceTransition, retireWorkspace, workspaceTransition } from './workspace-sync'
 import { ForemanView, ManagerView, WorkerView, type RunMutation } from './workspace'
 import './styles.css'
+import './fieldbook-worker.css'
+import './fieldbook-foreman.css'
+import './fieldbook-manager.css'
 
 type View = Role | 'welcome'
 type Route = { view: View; cardId: string | null }
 type LoadError = { message: string; retryAt?: number }
+type HandoffPosting = ApprovalPosting & { workspaceId: string }
 
 const syncTime = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit', second: '2-digit' })
 
@@ -39,6 +43,15 @@ function hasLaterCards(known: Workspace, snapshot: Workspace) {
   // Cards are never deleted within a generation, and each change advances the card version.
   const versions = new Map(snapshot.timecards.map((card) => [card.id, card.version]))
   return known.timecards.some((card) => (versions.get(card.id) ?? 0) < card.version)
+}
+
+function approvalPosting(start: Workspace | null, verified: Workspace, cardId: string | undefined): HandoffPosting | undefined {
+  if (start?.workspaceId !== verified.workspaceId || !start.timecards.some((card) => card.id === cardId && card.status === 'pending')) return
+  const card = verified.timecards.find((entry) => entry.id === cardId && entry.status === 'approved')
+  if (card?.approvedBeforeCents == null || card.costCents == null || card.costCents <= 0) return
+  const afterCents = card.approvedBeforeCents + card.costCents
+  if (afterCents !== verified.project.approvedCents) return
+  return { cardId: card.id, workspaceId: verified.workspaceId, beforeCents: card.approvedBeforeCents, afterCents }
 }
 
 function writeRoute(view: View, cardId: string | null, replace = false) {
@@ -75,8 +88,10 @@ function followDemoLink(event: MouseEvent<HTMLAnchorElement>, navigate: () => vo
 function Brand({ onHome }: { onHome: () => void }) {
   return (
     <a className="brand" href="#welcome" onClick={(event) => followDemoLink(event, onHome)}>
-      <span className="brand-mark"><Layers3 size={23} strokeWidth={2.3} /></span>
-      <span>FieldLedger<small>Field operations</small></span>
+      <span className="brand-mark" aria-hidden="true">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none"><path d="M4 18h16M4 14h10l3-4h3M4 10h6l3-4h7" stroke="currentColor" strokeWidth="1.45" /></svg>
+      </span>
+      <span>FieldLedger</span>
     </a>
   )
 }
@@ -156,7 +171,8 @@ function App() {
   const [lastSynced, setLastSynced] = useState<Date | null>(null)
   const [busy, setBusy] = useState(false)
   const [mutationError, setMutationError] = useState('')
-  const [notice, setNotice] = useState<{ message: string; next?: Role; cardId?: string } | null>(null)
+  const [notice, setNotice] = useState<{ message: string; next?: Role; cardId?: string; posting?: HandoffPosting } | null>(null)
+  const [posting, setPosting] = useState<HandoffPosting>()
   const [resetTarget, setResetTarget] = useState<string | null>(null)
   const writing = useRef(false)
   const activeLoad = useRef<number | null>(null)
@@ -183,6 +199,7 @@ function App() {
   }, [])
 
   const navigate = useCallback((route: Route) => {
+    setPosting(undefined)
     if (route.view !== routeView.current) {
       refreshFocus.current = null
       setManagerFresh(false)
@@ -192,8 +209,9 @@ function App() {
     setRoute(route)
   }, [])
 
-  const go = useCallback((target: View, targetCardId?: string) => {
+  const go = useCallback((target: View, targetCardId?: string, handoffPosting?: HandoffPosting) => {
     navigate(writeRoute(target, targetCardId ?? null))
+    if (target === 'manager' && handoffPosting?.cardId === targetCardId) setPosting(handoffPosting)
     setResetTarget(null)
     setNotice(null)
     setMutationError('')
@@ -205,6 +223,7 @@ function App() {
     if (view !== 'foreman' && view !== 'manager') return
     setRoute(writeRoute(view, id, replace))
     if (!replace) {
+      setPosting(undefined)
       setNotice(null)
       setMutationError('')
     }
@@ -433,7 +452,8 @@ function App() {
   const mutate: RunMutation = useCallback(async (operation, message, next) => {
     if (writing.current) return false
     const startingHash = window.location.hash
-    const startingWorkspaceId = workspaceRef.current?.workspaceId
+    const startingWorkspace = workspaceRef.current
+    const startingWorkspaceId = startingWorkspace?.workspaceId
     if (writeRefreshRequired || (startingWorkspaceId && workspaceTransition(startingWorkspaceId))) {
       void loadWorkspace(false)
       return false
@@ -490,7 +510,8 @@ function App() {
         return false
       }
       const result = typeof message === 'function' ? message(data) : { message, next }
-      setNotice(window.location.hash === startingHash ? { ...result, cardId: data.affectedCardId } : { message: result.message })
+      const posting = result.next === 'manager' && latest ? approvalPosting(startingWorkspace, latest, data.affectedCardId) : undefined
+      setNotice(window.location.hash === startingHash ? { ...result, cardId: data.affectedCardId, posting } : { message: result.message })
       return true
     } catch (error) {
       setMutationError(error instanceof ApiError ? error.message : 'The request didn’t finish. Try again.')
@@ -560,7 +581,7 @@ function App() {
       <header className="site-header">
         <div className="page-shell header-inner">
           <Brand onHome={() => go('welcome')} />
-          <span className="demo-label"><span className="signal-dot" /> Portfolio demo</span>
+          <span className="demo-label"><span className="signal-dot" /> Demo workspace</span>
         </div>
       </header>
       <main className="site-main" id="main-content" ref={main} tabIndex={-1}>
@@ -582,7 +603,7 @@ function App() {
             {notice && (
               <div className="notice" role="status" ref={feedback}>
                 <Check size={19} /> <span>{notice.message}</span>
-                {notice.next && <button type="button" data-handoff onClick={() => go(notice.next!, notice.cardId)}>Go to {notice.next} <ArrowRight size={15} /></button>}
+                {notice.next && <button type="button" data-handoff onClick={() => go(notice.next!, notice.cardId, notice.posting)}>Go to {notice.next} <ArrowRight size={15} /></button>}
                 <button className="dismiss-notice" type="button" aria-label="Dismiss update" onClick={(event) => {
                   if (document.activeElement === event.currentTarget) main.current?.focus({ preventScroll: true })
                   setNotice(null)
@@ -606,7 +627,7 @@ function App() {
             ) : <p className="panel workspace-loading" role="status">Opening your workspace…</p>)}
             {visibleWorkspace && view === 'worker' && <WorkerView key={roleKey} cardId={cardId} data={visibleWorkspace} busy={busy} writesBlocked={writesBlocked} run={mutate} go={go} />}
             {visibleWorkspace && view === 'foreman' && <ForemanView key={visibleWorkspace.workspaceId} cardId={cardId} data={visibleWorkspace} busy={busy} writesBlocked={writesBlocked} run={mutate} go={go} onSelectCard={selectCard} />}
-            {visibleWorkspace && view === 'manager' && <ManagerView key={visibleWorkspace.workspaceId} cardId={cardId} data={visibleWorkspace} onSelectCard={selectCard} costsStale={refreshError || !managerFresh || busy || transition !== null} />}
+            {visibleWorkspace && view === 'manager' && <ManagerView key={visibleWorkspace.workspaceId} cardId={cardId} data={visibleWorkspace} onSelectCard={selectCard} costsStale={refreshError || !managerFresh || busy || transition !== null} posting={posting?.workspaceId === visibleWorkspace.workspaceId ? posting : undefined} />}
             {resetTarget && <ResetDialog busy={busy} onClose={closeReset} onReset={reset} />}
           </div>
         )}

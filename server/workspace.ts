@@ -64,6 +64,7 @@ interface Timecard {
   reason: string | null;
   costCents: number | null;
   rateCents: number | null;
+  approvedBeforeCents: number | null;
   audit: AuditEvent[];
 }
 
@@ -78,6 +79,8 @@ export interface Workspace {
 }
 
 export async function readWorkspace(db: Pool | PoolClient, session: string, fixtures: Fixtures): Promise<Workspace | undefined> {
+  // Seed imports have synthetic decision dates. User approvals are serialized by the workspace lock,
+  // so their audit IDs preserve posting order even when the transaction timestamps overlap.
   const result = await db.query<{ workspace: Workspace }>(`
     WITH visible_cards AS (
       SELECT card.id, worker.name AS "workerName", to_char(card.work_date, 'YYYY-MM-DD') AS "workDate", card.hours,
@@ -86,7 +89,9 @@ export async function readWorkspace(db: Pool | PoolClient, session: string, fixt
         reviewer.name AS "decisionBy", card.reason,
         COALESCE(card.approved_rate_cents, rate.rate_cents) AS "rateCents",
         COALESCE(card.approved_cost_cents, round(card.hours * rate.rate_cents)::integer) AS "costCents",
-        COALESCE(history.events, '[]'::json) AS audit
+        COALESCE(history.events, '[]'::json) AS audit,
+        card.request_id IS NULL AS seeded,
+        history.posting_id
       FROM timecards card
       JOIN people worker ON worker.id = card.worker_id
       LEFT JOIN people reviewer ON reviewer.id = card.decision_by
@@ -99,16 +104,28 @@ export async function readWorkspace(db: Pool | PoolClient, session: string, fixt
         SELECT json_agg(json_build_object('action', event.action, 'actor', actor.name, 'at', event.occurred_at, 'note', event.note,
           'workDate', to_char(event.work_date, 'YYYY-MM-DD'), 'hours', event.hours,
           'previousWorkDate', to_char(event.previous_work_date, 'YYYY-MM-DD'), 'previousHours', event.previous_hours)
-           ORDER BY event.id) AS events
+           ORDER BY event.id) AS events,
+          max(event.id) FILTER (WHERE event.action = 'approved') AS posting_id
         FROM audit_events event JOIN people actor ON actor.id = event.actor_id
         WHERE event.timecard_id = card.id
       ) history ON true
       WHERE card.session_id = $1
+    ), postings AS (
+      SELECT id, CASE WHEN count(posting_id) OVER () = count(*) OVER () AND count("costCents") OVER () = count(*) OVER ()
+        THEN COALESCE(sum("costCents") OVER (
+          ORDER BY seeded DESC, CASE WHEN seeded THEN "decisionAt" END, posting_id
+          ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+        ), 0)
+      END AS before_cents
+      FROM visible_cards WHERE status = 'approved'
     ), card_totals AS (
       SELECT COALESCE(sum("costCents") FILTER (WHERE status = 'approved'), 0) AS approved,
         COALESCE(sum("costCents") FILTER (WHERE status = 'pending'), 0) AS pending,
-        COALESCE(json_agg(visible_cards ORDER BY "workDate" DESC, "submittedAt" DESC, id), '[]'::json) AS cards
+        COALESCE(jsonb_agg((to_jsonb(visible_cards) - 'seeded' - 'posting_id')
+          || jsonb_build_object('approvedBeforeCents', postings.before_cents)
+          ORDER BY "workDate" DESC, "submittedAt" DESC, visible_cards.id), '[]'::jsonb) AS cards
       FROM visible_cards
+      LEFT JOIN postings USING (id)
     )
     SELECT json_build_object(
       'workspaceId', session.workspace_id,

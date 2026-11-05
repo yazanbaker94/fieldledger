@@ -290,6 +290,7 @@ test('field timecards against PostgreSQL', async (context) => {
   await context.test('returns, corrects and approves once, preserving the audit trail', async () => {
     const endpoint = `/timecards/${id}/decision`;
     assert.equal((await first(endpoint, { role: 'worker', body: { decision: 'approve', version: 1 } })).status, 403);
+    assert.equal((await first(endpoint, { role: 'manager', body: { decision: 'approve', version: 1 } })).status, 403);
     assert.equal((await first(endpoint, { role: 'foreman', body: { decision: 'return', version: 1, reason: ' ' } })).status, 400);
     for (const reason of ['invalid\u0000text', 'invalid\ud800text', 'invalid\udffftext', '\u200b\ufe0f']) {
       assert.equal((await first(endpoint, { role: 'foreman', body: { decision: 'return', version: 1, reason } })).status, 400);
@@ -321,6 +322,8 @@ test('field timecards against PostgreSQL', async (context) => {
     assert.equal(card.status, 'approved');
     assert.equal(card.decisionBy, 'Lucas Martin');
     assert.equal(card.costCents, 40_000);
+    assert.equal(card.approvedBeforeCents, 970_000);
+    assert.equal(duplicate.data.timecards.find((candidate) => candidate.id === id)?.approvedBeforeCents, 970_000);
     assert.deepEqual(card.audit.map((event) => event.action), ['submitted', 'returned', 'resubmitted', 'approved']);
     assert.equal(card.audit[1].note, reason);
     assert.equal((await first('/workspace')).data.project.approvedCents, 1_010_000);

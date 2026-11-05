@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent, type MouseEvent, type ReactNode } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent, type MouseEvent, type ReactNode, type RefObject } from 'react'
 import {
-  ArrowDown, ArrowLeft, ArrowRight, ArrowUpRight, CalendarDays, ChartNoAxesCombined, Check, ChevronRight,
-  CircleAlert, ClipboardCheck, ClipboardList, Clock3, CornerUpLeft, FileText, MapPin,
+  ArrowLeft, ArrowRight, ArrowUpRight, CalendarDays, Check, ChevronRight,
+  ClipboardCheck, ClipboardList, Clock3, CornerUpLeft, FileText, MapPin,
 } from 'lucide-react'
 import { hasVisibleNote } from '../server/note'
-import { api, ApiError, type Role, type Timecard, type Workspace } from './api'
+import { api, ApiError, type ApprovalPosting, type Role, type Timecard, type Workspace } from './api'
+import { CostTrail } from './cost-trail'
 import { confirmAttempt, hasAttempt, latestAttempt, latestSubmissionAttempt, onSubmissionAttemptsChanged, rememberAttempt, type SubmissionAttempt } from './submission-retries'
 
 export type RunMutation = (operation: () => Promise<Workspace | null>, message: string | ((data: Workspace) => { message: string; next?: Role }), next?: Role) => Promise<boolean>
@@ -60,7 +61,9 @@ function PageTitle({ role, title, description, data }: { role: Role; title: stri
   return (
     <div className="workspace-heading">
       <div>
-        <p className="eyebrow section-kicker"><span /> {role === 'manager' ? 'Project manager' : role} workspace</p>
+        <p className="section-kicker">
+          {role === 'worker' ? 'Field timekeeping' : <><span>{data.project.code}</span> {data.project.name}</>}
+        </p>
         <h1 id={titleId}>{title}</h1>
         <p>{description}</p>
       </div>
@@ -82,11 +85,14 @@ function Empty({ title, text, children }: { title: string; text: string; childre
   )
 }
 
-function ProjectBadge({ project }: { project: Workspace['project'] }) {
+function WorkerProjectRegister({ project }: { project: Workspace['project'] }) {
   return (
-    <div className="project-badge">
-      <span className="project-pin"><MapPin size={20} /></span>
-      <span><small>Assigned project</small><strong>{project.name}</strong><span>{project.code} · {project.location}</span></span>
+    <div className="worker-project-register">
+      <div><span>Assigned project</span><strong>{project.name}</strong></div>
+      <div className="worker-project-location">
+        <span className="worker-project-code">{project.code}</span>
+        <span><MapPin size={13} aria-hidden="true" /> {project.location}</span>
+      </div>
     </div>
   )
 }
@@ -176,7 +182,6 @@ function TimecardForm({ data, busy, writesBlocked, run, editing, currentCard, cl
     <section className="panel log-panel" aria-label={editing ? 'Correct timecard' : 'New timecard'}>
       <PanelTitle icon={<FileText size={20} />} title={editing ? 'Correct timecard' : 'New timecard'} />
       <div className="panel-body">
-        <ProjectBadge project={data.project} />
         {note && <div className="correction-callout"><CornerUpLeft size={18} /><div><strong>Foreman’s correction note</strong><p>{note}</p></div></div>}
         {stale && currentCard && (
           <div className="draft-conflict" role="alert">
@@ -275,22 +280,21 @@ function CardSummary({ card, showCost }: { card: Timecard; showCost: boolean }) 
   )
 }
 
-function CardRow({ card, showCost, selected, controls, onClick }: { card: Timecard; showCost?: boolean; selected: boolean; controls?: string; onClick: (event: MouseEvent<HTMLButtonElement>) => void }) {
+function CardRow({ card, selected, controls, onClick }: { card: Timecard; selected: boolean; controls?: string; onClick: (event: MouseEvent<HTMLButtonElement>) => void }) {
   return (
-    <button className={`card-row${selected ? ' card-row-selected' : ''}${showCost ? ' card-row-cost' : ''}`} type="button" onClick={onClick}
+    <button className={`card-row${selected ? ' card-row-selected' : ''}`} type="button" onClick={onClick}
       data-card-id={card.id} aria-expanded={selected} aria-controls={controls}>
       <span className="sr-only">View timecard for </span>
       <span className="card-row-icon"><CalendarDays size={17} /></span>
       <span className="card-row-title"><strong>{workDate(card.workDate)}</strong><small>{card.workerName} · {card.hours} hrs</small></span>
       <Status status={card.status} />
-      {showCost && <strong className="row-cost">{timecardCost(card.costCents)}</strong>}
       <ChevronRight className="row-chevron" size={17} aria-hidden="true" />
     </button>
   )
 }
 
-function focusDetails(detail: HTMLElement | null, event?: MouseEvent<HTMLButtonElement>) {
-  const mobile = window.matchMedia('(max-width: 800px)').matches
+function focusDetails(detail: HTMLElement | null, event?: MouseEvent<HTMLButtonElement>, stacked?: boolean) {
+  const mobile = stacked ?? window.matchMedia('(max-width: 800px)').matches
   if (!mobile && event && event.detail !== 0) return
   detail?.scrollIntoView({ block: mobile ? 'start' : 'nearest' })
   detail?.focus({ preventScroll: true })
@@ -412,9 +416,10 @@ export function WorkerView({ cardId, data, busy, writesBlocked, run, go }: ViewP
   }
 
   return (
-    <section aria-labelledby="worker-title">
-      <PageTitle role="worker" title="Log a timecard" description="Record a shift and follow its status from submission to approval." data={data} />
-      <div className="content-grid worker-grid">
+    <section className="worker-workspace" aria-labelledby="worker-title">
+      <PageTitle role="worker" title="Log a timecard" description="Enter your shift and check its review status." data={data} />
+      <div className="content-grid worker-grid worker-register">
+        <WorkerProjectRegister project={data.project} />
         <div className="view-stack" ref={formArea}>
           {primaryCorrection && !editing && !cardId && (
             <aside className="correction-action" aria-labelledby="correction-title">
@@ -440,7 +445,7 @@ export function WorkerView({ cardId, data, busy, writesBlocked, run, go }: ViewP
               setRetryDraft={updateRetryDraft}
               checkRetry={(attempt) => void recover(attempt, true)} discardRetry={(attempt) => void discard(attempt)} />
           )}
-          {!cardId && <aside className="next-step"><span className="step-icon"><ClipboardCheck size={20} /></span><div><h3>What happens next?</h3><p>Your foreman sees the timecard in their review queue.</p></div><button className="text-button" type="button" onClick={() => go('foreman')}>Open foreman view <ArrowUpRight size={15} /></button></aside>}
+          {!cardId && <aside className="next-step"><ClipboardCheck size={17} aria-hidden="true" /><div><h3>After submission</h3><p>Your foreman reviews the shift.</p></div><button className="text-button" type="button" onClick={() => go('foreman')}>Open foreman view <ArrowUpRight size={15} /></button></aside>}
         </div>
         <section className="panel" aria-label="My timecards">
           <PanelTitle icon={<Clock3 size={20} />} title="My timecards"><span className="count-pill">{ownCards.length}</span></PanelTitle>
@@ -575,11 +580,11 @@ export function ForemanView({ cardId, data, busy, writesBlocked, run, go, onSele
   }
 
   return (
-    <section aria-labelledby="foreman-title">
-      <PageTitle role="foreman" title="Review timecards" description="Check hours for the project, approve the work, or send an entry back with a note." data={data} />
-      <div className="content-grid foreman-grid">
-        <section className="panel" aria-label="Review queue" ref={queue} tabIndex={-1}>
-          <PanelTitle icon={<ClipboardList size={20} />} title="Review queue"><span className="count-pill">{pending.length} pending</span></PanelTitle>
+    <section className="foreman-workspace" aria-labelledby="foreman-title">
+      <PageTitle role="foreman" title="Review timecards" description="Review submitted hours for the project. Approvals post to the labour ledger." data={data} />
+      <div className="content-grid foreman-grid foreman-board">
+        <section className="panel foreman-queue" aria-label="Review queue" ref={queue} tabIndex={-1}>
+          <PanelTitle icon={<ClipboardList size={17} />} title="Review queue"><span className="count-pill">{pending.length} pending</span></PanelTitle>
           <div className="filter-group" role="group" aria-label="Filter review queue">
             <button type="button" aria-pressed={filter === 'pending'} onClick={() => setFilter('pending')}>Pending</button>
             <button type="button" aria-pressed={filter === 'all'} onClick={() => setFilter('all')}>All timecards</button>
@@ -592,14 +597,19 @@ export function ForemanView({ cardId, data, busy, writesBlocked, run, go, onSele
             </Empty>
           )}
         </section>
-        <section className="panel review-panel" id="timecard-review" aria-label="Timecard review" ref={review} tabIndex={-1}>
-          <PanelTitle icon={<FileText size={20} />} title="Timecard review">
-            {cardId && <button className="text-button detail-back" type="button" onClick={() => focusLedger(queue.current, selected?.id)}><ArrowLeft size={14} /> Back to review queue</button>}
+        <section className="panel review-panel foreman-review" id="timecard-review" aria-label="Timecard review" ref={review} tabIndex={-1}>
+          <PanelTitle icon={<FileText size={17} />} title="Timecard review">
+            {cardId && <div className="foreman-review-tools">
+              {selected && <span className="foreman-trace-key"><span className="sr-only">Timecard reference </span>{timecardReference(selected)}</span>}
+              <button className="text-button detail-back" type="button" onClick={() => focusLedger(queue.current, selected?.id)}><ArrowLeft size={14} /> Back to review queue</button>
+            </div>}
           </PanelTitle>
-          {selected ? <div className="panel-body">
-            <CardSummary card={selected} showCost />
-            <ForemanDecision key={selected.id} workspaceId={data.workspaceId} card={selected} busy={busy} writesBlocked={writesBlocked} run={run} complete={() => setFilter('all')} />
-            <Audit card={selected} />
+          {selected ? <div className="foreman-review-body">
+            <div className="foreman-source">
+              <CardSummary card={selected} showCost />
+              <ForemanDecision key={selected.id} workspaceId={data.workspaceId} card={selected} busy={busy} writesBlocked={writesBlocked} run={run} complete={() => setFilter('all')} />
+            </div>
+            <div className="foreman-history"><Audit card={selected} /></div>
           </div> : cardId
             ? <Empty title="Selected timecard unavailable" text="Choose another timecard from the review queue." />
             : <Empty title="No timecard selected" text="Open a timecard from the queue to see its hours and activity." />}
@@ -609,70 +619,120 @@ export function ForemanView({ cardId, data, busy, writesBlocked, run, go, onSele
   )
 }
 
-function Budget({ project, openTimecard, costsStale }: { project: Workspace['project']; openTimecard?: () => void; costsStale?: boolean }) {
-  const balance = project.budgetCents - project.approvedCents
-  const overBudget = balance < 0
-  const used = project.budgetCents ? project.approvedCents / project.budgetCents * 100 : 0
-  const percentage = new Intl.NumberFormat('en-CA', { maximumFractionDigits: 1 }).format(used)
+function timecardReference(card: Timecard) {
+  return card.id.slice(0, 8).toUpperCase()
+}
+
+function CostSource({ card, sourceAnchor }: { card: Timecard; sourceAnchor: RefObject<SVGSVGElement | null> }) {
+  const approved = card.status === 'approved'
   return (
-    <section className="panel budget-panel" aria-label="Project labour budget">
-      <div className="budget-header">
-        <div><p className="eyebrow"><span className="signal-dot" /> {costsStale ? 'Last saved project costs' : 'Live project costs'}</p><h2>{project.name}</h2><p><MapPin size={15} /> {project.location} <span className="budget-divider" /> {project.code}</p></div>
-        <span className={`budget-state${overBudget ? ' budget-state-over' : ''}`}>{overBudget ? <CircleAlert size={16} /> : <Check size={16} />} {overBudget ? 'Over budget' : 'Within budget'}</span>
+    <>
+      <div className="manager-source-person">
+        <Status status={card.status} />
+        <h3>{card.workerName}</h3>
+        <p>Work date <time dateTime={card.workDate}>{workDate(card.workDate)}</time></p>
       </div>
-      {openTimecard && <button className="budget-handoff" type="button" aria-controls="cost-details" onClick={openTimecard}>View approved timecard <ArrowDown size={15} /></button>}
-      <div className="budget-metrics">
-        <div><span>Approved labour</span><output id="approved-total" aria-label="Approved labour">{money(project.approvedCents)}</output></div>
-        <div><span>Labour budget</span><strong>{money(project.budgetCents)}</strong></div>
-        <div><span>Pending labour estimate</span><strong>{money(project.pendingCents)}</strong></div>
+      <dl className="manager-source-facts">
+        <div><dt>Hours worked</dt><dd>{card.hours} hrs</dd></div>
+        <div><dt>{approved ? 'Applied rate' : 'Estimated rate'}</dt><dd>{typeof card.rateCents === 'number' ? `${money(card.rateCents)}/hr` : 'Rate unavailable'}</dd></div>
+      </dl>
+      <div className="manager-source-value">
+        <div><span>{approved ? 'Posting value' : 'Estimated value'}</span><strong>{timecardCost(card.costCents)}</strong></div>
+        <svg ref={sourceAnchor} viewBox="0 0 35 21" width="35" height="21" aria-hidden="true" fill="none"><path d="M1 6h12l5 9h15m-5-5 5 5-5 5" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" /></svg>
       </div>
-      <div className="budget-progress">
-        <div><strong>{percentage}% of labour budget used</strong><span className={overBudget ? 'over-amount' : ''}>{money(Math.abs(balance))} {overBudget ? 'over budget' : 'remaining'}</span></div>
-        <progress className={overBudget ? 'over-progress' : ''} max={100} value={Math.min(used, 100)} aria-hidden="true" />
-      </div>
-    </section>
+      {typeof card.rateCents === 'number' && <p className="manager-source-calculation">{card.hours} hrs × {money(card.rateCents)}/hr</p>}
+      <Audit card={card} />
+    </>
   )
 }
 
-export function ManagerView({ data, cardId, onSelectCard, costsStale }: { data: Workspace; cardId: string | null; costsStale?: boolean } & CardSelection) {
+export function ManagerView({ data, cardId, onSelectCard, costsStale, posting }: {
+  data: Workspace
+  cardId: string | null
+  costsStale?: boolean
+  posting?: ApprovalPosting
+} & CardSelection) {
   const [filter, setFilter] = useState<'approved' | 'all'>(() => data.timecards.some((card) => card.id === cardId && card.status !== 'approved') ? 'all' : 'approved')
   const detail = useRef<HTMLElement>(null)
   const ledger = useRef<HTMLElement>(null)
+  const sourceAnchor = useRef<SVGSVGElement>(null)
   const approved = data.timecards.filter((card) => card.status === 'approved')
   const shown = filter === 'approved' ? approved : data.timecards
   const selected = data.timecards.find((card) => card.id === cardId)
 
+  useLayoutEffect(() => {
+    const scroll = ledger.current?.querySelector<HTMLElement>('.manager-ledger-scroll')
+    const row = scroll?.querySelector('tr[data-selected="true"]')
+    if (!scroll || !row) return
+    const bounds = scroll.getBoundingClientRect()
+    const rowBounds = row.getBoundingClientRect()
+    const top = scroll.querySelector('thead')?.getBoundingClientRect().bottom ?? bounds.top
+    if (rowBounds.top < top - 1 || rowBounds.bottom > bounds.bottom + 1) {
+      scroll.scrollTop += rowBounds.top - top
+    }
+  }, [cardId, filter])
+
+  function showSource(event?: MouseEvent<HTMLButtonElement>) {
+    const stacked = detail.current?.offsetWidth === ledger.current?.offsetWidth
+    focusDetails(detail.current, event, stacked)
+  }
+
   function select(card: Timecard, event: MouseEvent<HTMLButtonElement>) {
     onSelectCard(card.id)
-    requestAnimationFrame(() => focusDetails(detail.current, event))
+    requestAnimationFrame(() => showSource(event))
   }
 
   return (
-    <section aria-labelledby="manager-title">
-      <PageTitle role="manager" title="Labour budget" description="Compare approved hours against the project’s labour budget and open the timecards behind the total." data={data} />
-      <Budget project={data.project} openTimecard={selected?.status === 'approved' ? () => focusDetails(detail.current) : undefined} costsStale={costsStale} />
-      <div className="content-grid manager-grid">
-        <section className="panel" aria-label="Timecard ledger" ref={ledger} tabIndex={-1}>
-          <PanelTitle icon={<ClipboardList size={20} />} title="Timecard ledger"><span className="count-pill">CAD</span></PanelTitle>
-          <div className="filter-group" role="group" aria-label="Filter timecard ledger">
-            <button type="button" aria-pressed={filter === 'approved'} onClick={() => setFilter('approved')}>Approved</button>
-            <button type="button" aria-pressed={filter === 'all'} onClick={() => setFilter('all')}>All timecards</button>
-          </div>
-          {shown.length ? <div className="card-list">
-            {shown.map((card) => <div className="card-list-item" key={card.id}><CardRow card={card} showCost selected={cardId === card.id} controls="cost-details" onClick={(event) => select(card, event)} /></div>)}
-          </div> : <Empty title="No timecards to show" text="Approved timecards will appear in the project ledger." />}
+    <section className="fieldbook-manager" aria-labelledby="manager-title">
+      <PageTitle role="manager" title="Labour budget" description="Trace approved labour back to the work that posted it." data={data} />
+      <div className="manager-register">
+        <CostTrail project={data.project} card={selected} recordCode={selected && timecardReference(selected)}
+          openTimecard={selected?.status === 'approved' ? () => showSource() : undefined}
+          costsStale={costsStale} posting={posting} sourceAnchor={sourceAnchor} money={money} />
+        <section className="manager-ledger" aria-label="Timecard ledger" ref={ledger} tabIndex={-1}>
+          <header className="manager-ledger-head">
+            <div><h2>Labour postings</h2><span>{shown.length} {shown.length === 1 ? 'timecard' : 'timecards'} · CAD</span></div>
+            <div className="filter-group" role="group" aria-label="Filter timecard ledger">
+              <button type="button" aria-pressed={filter === 'approved'} onClick={() => setFilter('approved')}>Approved</button>
+              <button type="button" aria-pressed={filter === 'all'} onClick={() => setFilter('all')}>All timecards</button>
+            </div>
+          </header>
+          {shown.length ? (
+            <div className="manager-ledger-scroll"><table className="manager-ledger-table">
+              <thead><tr><th scope="col">Timecard</th><th scope="col">Work date</th><th scope="col" className="manager-numeric">Hours</th><th scope="col" className="manager-numeric">Labour cost</th><th scope="col">Status</th></tr></thead>
+              <tbody>
+                {shown.map((card) => (
+                  <tr key={card.id} data-selected={cardId === card.id} data-posted={posting?.cardId === card.id && cardId === card.id}>
+                    <th scope="row">
+                      <button className="card-row manager-ledger-button" type="button" data-card-id={card.id} aria-expanded={cardId === card.id} aria-controls="cost-details" onClick={(event) => select(card, event)}>
+                        <span className="sr-only">View timecard for </span>
+                        <span className="field-trace-key">{timecardReference(card)}</span>
+                        <span className="card-row-title"><strong>{card.workerName}</strong><span className="manager-row-date">{workDate(card.workDate)}</span></span>
+                        <span className="sr-only">{card.hours} hrs</span>
+                      </button>
+                    </th>
+                    <td><time dateTime={card.workDate}>{workDate(card.workDate)}</time></td>
+                    <td className="manager-numeric">{card.hours}</td>
+                    <td className="manager-numeric"><strong>{timecardCost(card.costCents)}</strong>{card.status !== 'approved' && card.costCents !== null && <small> est.</small>}</td>
+                    <td><Status status={card.status} /></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table></div>
+          ) : <Empty title="No timecards to show" text="Approved timecards will appear in the project ledger." />}
         </section>
-        <section className="panel review-panel" id="cost-details" aria-label="Cost details" ref={detail} tabIndex={-1}>
-          <PanelTitle icon={<ChartNoAxesCombined size={20} />} title="Cost details">
-            {cardId && <button className="text-button detail-back" type="button" onClick={() => focusLedger(ledger.current, selected?.id)}><ArrowLeft size={14} /> Back to timecard ledger</button>}
-          </PanelTitle>
-          {selected ? <div className="panel-body"><CardSummary card={selected} showCost /><Audit card={selected} /></div>
+        <section className="manager-source" id="cost-details" aria-label="Cost details" ref={detail} tabIndex={-1}>
+          <header className="manager-source-head">
+            <h2>Source timecard</h2>
+            {selected && <span className="field-trace-key">{timecardReference(selected)}</span>}
+          </header>
+          {selected ? <CostSource card={selected} sourceAnchor={sourceAnchor} />
             : cardId
               ? <Empty title="Selected timecard unavailable" text="Choose another timecard from the ledger." />
               : <Empty title="Open a timecard" text="See its recorded hours, labour cost, and approval history." />}
+          {cardId && <button className="text-button manager-source-back" type="button" onClick={() => focusLedger(ledger.current, selected?.id)}><ArrowLeft size={15} /> Back to timecard ledger</button>}
         </section>
       </div>
-      <p className="budget-footnote"><ArrowDown size={15} /> Pending submissions appear as an estimate until the foreman approves them.</p>
     </section>
   )
 }

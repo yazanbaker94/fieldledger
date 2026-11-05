@@ -1,5 +1,6 @@
 export type Role = 'worker' | 'foreman' | 'manager'
 export type CardStatus = 'pending' | 'returned' | 'approved'
+export type ApprovalPosting = { cardId: string; beforeCents: number; afterCents: number }
 
 export type Timecard = {
   id: string
@@ -13,6 +14,7 @@ export type Timecard = {
   reason: string | null
   costCents: number | null
   rateCents: number | null
+  approvedBeforeCents?: number | null
   version: number
   canReturn?: boolean
   audit: {
