@@ -355,7 +355,7 @@ test("two tabs opening the demo for the first time share a single browser worksp
     const body = await response.json() as { workspaceId: string };
     ids[position] = body.workspaceId;
     await route.fulfill({ response });
-  });
+  }, { times: 2 });
 
   await page.goto("/#worker");
   await expect.poll(() => count).toBe(1);
