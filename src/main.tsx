@@ -216,7 +216,7 @@ function App() {
     setNotice(null)
     setMutationError('')
     window.scrollTo(0, 0)
-    requestAnimationFrame(() => main.current?.focus({ preventScroll: true }))
+    main.current?.focus({ preventScroll: true })
   }, [navigate])
 
   const selectCard = useCallback((id: string, replace = false) => {
