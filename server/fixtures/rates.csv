@@ -1,2 +1,5 @@
 project_id,worker_id,effective_from,rate_cents
 riverside,maya,2000-01-01,5000
+riverside,joel,2000-01-01,4800
+riverside,imani,2000-01-01,5600
+riverside,nadia,2000-01-01,4400

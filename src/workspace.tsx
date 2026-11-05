@@ -6,6 +6,7 @@ import {
 import { hasVisibleNote } from '../server/note'
 import { api, ApiError, type ApprovalPosting, type Role, type Timecard, type Workspace } from './api'
 import { CostTrail } from './cost-trail'
+import { exampleCorrectedHours, exampleCorrectionNote, exampleInitialHours } from './demo-walkthrough'
 import { confirmAttempt, hasAttempt, latestAttempt, latestSubmissionAttempt, onSubmissionAttemptsChanged, rememberAttempt, type SubmissionAttempt } from './submission-retries'
 
 export type RunMutation = (operation: () => Promise<Workspace | null>, message: string | ((data: Workspace) => { message: string; next?: Role }), next?: Role) => Promise<boolean>
@@ -36,6 +37,10 @@ function timecardCost(cents: Timecard['costCents']) {
 
 function workDate(date: string) {
   return shortDate.format(new Date(`${date}T12:00:00`))
+}
+
+function isDemoWorker(card: Timecard, worker: Workspace['worker']) {
+  return worker.id && card.workerId ? worker.id === card.workerId : worker.name === card.workerName
 }
 
 function today() {
@@ -111,11 +116,15 @@ function TimecardForm({ data, busy, writesBlocked, run, editing, currentCard, cl
   const [version, setVersion] = useState(() => retryDraft?.correction?.version ?? editing?.version)
   const [previousDraft, setPreviousDraft] = useState<{ date: string; hours: string }>()
   const dateField = useRef<HTMLInputElement>(null)
+  const hoursField = useRef<HTMLInputElement>(null)
   const unavailable = editing !== null && currentCard?.status !== 'returned'
   const stale = currentCard?.status === 'returned' && currentCard.version !== version
   const note = currentCard?.reason ?? editing?.reason
   const matchingRetry = retryDraft?.workDate === date && retryDraft.hours === Number(hours) ? retryDraft : undefined
   const changedSubmission = !editing && Boolean(retryDraft && !matchingRetry)
+  const showExample = !busy && !writesBlocked && !retryDraft && !stale && !unavailable
+    && (!editing || note === exampleCorrectionNote)
+  const exampleHours = editing ? exampleCorrectedHours : exampleInitialHours
 
   function restoreSubmission(attempt: SubmissionAttempt) {
     setDate(attempt.workDate)
@@ -180,7 +189,9 @@ function TimecardForm({ data, busy, writesBlocked, run, editing, currentCard, cl
 
   return (
     <section className="panel log-panel" aria-label={editing ? 'Correct timecard' : 'New timecard'}>
-      <PanelTitle icon={<FileText size={20} />} title={editing ? 'Correct timecard' : 'New timecard'} />
+      <PanelTitle icon={<FileText size={20} />} title={editing ? 'Correct timecard' : 'New timecard'}>
+        {editing && <span className="worker-record-key"><span className="sr-only">Timecard reference </span>{timecardReference(editing)}</span>}
+      </PanelTitle>
       <div className="panel-body">
         {note && <div className="correction-callout"><CornerUpLeft size={18} /><div><strong>Foreman’s correction note</strong><p>{note}</p></div></div>}
         {stale && currentCard && (
@@ -203,12 +214,21 @@ function TimecardForm({ data, busy, writesBlocked, run, editing, currentCard, cl
             </label>
             <label htmlFor="hours-worked">Hours worked
               <span className="input-suffix">
-                <input id="hours-worked" type="number" inputMode="decimal" min="0.01" max="24" step="0.01" value={hours} required onChange={(event) => setHours(event.target.value)} disabled={busy || stale || unavailable} />
+                <input ref={hoursField} id="hours-worked" type="number" inputMode="decimal" min="0.01" max="24" step="0.01" value={hours} required onChange={(event) => setHours(event.target.value)} disabled={busy || stale || unavailable} />
                 <span aria-hidden="true">hrs</span>
               </span>
             </label>
           </div>
-          <p className="field-help">Log regular hours worked on this project.</p>
+          {showExample ? (
+            <div className="worker-example">
+              <div><strong>{editing ? 'Correct the example shift' : 'Try the correction walkthrough'}</strong>
+                <p>{editing ? 'Enter the full shift, then resubmit for review.' : `Start with ${exampleInitialHours} hours, then submit this shift for review.`}</p></div>
+              <button className="text-button" type="button" aria-controls="hours-worked" onClick={() => {
+                setHours(String(exampleHours))
+                hoursField.current?.focus()
+              }}>Use {exampleHours} hours <ArrowRight size={14} /></button>
+            </div>
+          ) : <p className="field-help">Log regular hours worked on this project.</p>}
           {previousDraft && <p className="field-help">Previous draft: {previousDraft.hours ? `${previousDraft.hours} hrs` : 'Hours unset'}{previousDraft.date && ` · ${workDate(previousDraft.date)}`}</p>}
           {retryDraft && !editing && (
             <div className="draft-conflict" role="status">
@@ -258,35 +278,28 @@ function Audit({ card }: { card: Timecard }) {
   )
 }
 
-function CardSummary({ card, showCost }: { card: Timecard; showCost: boolean }) {
+function CardSummary({ card }: { card: Timecard }) {
   return (
     <>
       <div className="card-summary-header">
         <div><p className="eyebrow">Timecard</p><h3>{card.workerName}</h3></div>
         <Status status={card.status} />
       </div>
-      <dl className={`card-facts${showCost ? ' has-cost' : ''}`}>
+      <dl className="card-facts">
         <div><dt>Work date</dt><dd>{workDate(card.workDate)}</dd></div>
         <div><dt>Hours worked</dt><dd>{card.hours} hrs</dd></div>
-        {showCost && <div><dt>{card.status === 'approved' ? 'Approved cost' : 'Est. cost'}</dt><dd>{timecardCost(card.costCents)}</dd></div>}
       </dl>
-      {showCost && typeof card.rateCents === 'number' && (
-        <p className="cost-calculation">
-          <span>{card.status === 'approved' ? 'Applied labour rate' : 'Estimated labour rate'}</span>
-          <strong>{card.hours} hrs × {money(card.rateCents)}/hr</strong>
-        </p>
-      )}
     </>
   )
 }
 
-function CardRow({ card, selected, controls, onClick }: { card: Timecard; selected: boolean; controls?: string; onClick: (event: MouseEvent<HTMLButtonElement>) => void }) {
+function CardRow({ card, selected, onClick }: { card: Timecard; selected: boolean; onClick: (event: MouseEvent<HTMLButtonElement>) => void }) {
   return (
     <button className={`card-row${selected ? ' card-row-selected' : ''}`} type="button" onClick={onClick}
-      data-card-id={card.id} aria-expanded={selected} aria-controls={controls}>
+      data-card-id={card.id} aria-expanded={selected} aria-controls="timecard-review">
       <span className="sr-only">View timecard for </span>
       <span className="card-row-icon"><CalendarDays size={17} /></span>
-      <span className="card-row-title"><strong>{workDate(card.workDate)}</strong><small>{card.workerName} · {card.hours} hrs</small></span>
+      <span className="card-row-title"><strong>{card.workerName}</strong><small><time dateTime={card.workDate}>{workDate(card.workDate)}</time> · {card.hours} hrs</small></span>
       <Status status={card.status} />
       <ChevronRight className="row-chevron" size={17} aria-hidden="true" />
     </button>
@@ -307,7 +320,7 @@ function focusLedger(ledger: HTMLElement | null, cardId?: string) {
 }
 
 export function WorkerView({ cardId, data, busy, writesBlocked, run, go }: ViewProps) {
-  const ownCards = data.timecards.filter((card) => card.workerName === data.worker.name)
+  const ownCards = data.timecards.filter((card) => isDemoWorker(card, data.worker))
   const linkedCard = ownCards.find((card) => card.id === cardId)
   const [opening] = useState(() => {
     const attempt = latestAttempt(data.workspaceId, cardId ?? undefined) ?? latestSubmissionAttempt(data.workspaceId)
@@ -316,6 +329,7 @@ export function WorkerView({ cardId, data, busy, writesBlocked, run, go }: ViewP
   })
   const [editing, setEditing] = useState(opening.editor)
   const [openId, setOpenId] = useState<string | null>(null)
+  const [showHistory, setShowHistory] = useState(false)
   const [correctionRetry, setCorrectionRetry] = useState(() => opening.attempt?.correction ? opening.attempt : undefined)
   const [submissionRetry, setSubmissionRetry] = useState(() => latestSubmissionAttempt(data.workspaceId))
   const formArea = useRef<HTMLDivElement>(null)
@@ -324,8 +338,11 @@ export function WorkerView({ cardId, data, busy, writesBlocked, run, go }: ViewP
     ? correctionRetry?.correction?.cardId === editing.id ? correctionRetry : undefined
     : submissionRetry
   const formRetry = retryDraft && hasAttempt(data.workspaceId, retryDraft.requestId) ? retryDraft : undefined
-  const sortedCards = [...ownCards].sort((first, second) => Number(second.status === 'returned') - Number(first.status === 'returned'))
+  const statusOrder = { returned: 0, pending: 1, approved: 2 }
+  const sortedCards = [...ownCards].sort((first, second) => statusOrder[first.status] - statusOrder[second.status])
   const primaryCorrection = sortedCards.find((card) => card.status === 'returned')
+  const recentCards = sortedCards.filter((card, index) => index < 5 || card.status === 'returned' || card.id === cardId || card.id === openId)
+  const displayedCards = showHistory ? sortedCards : recentCards
 
   const updateRetryDraft = useCallback((attempt: SubmissionAttempt | undefined, requestId: string) => {
     setCorrectionRetry((draft) => attempt?.correction ? attempt : draft?.requestId === requestId ? undefined : draft)
@@ -399,8 +416,9 @@ export function WorkerView({ cardId, data, busy, writesBlocked, run, go }: ViewP
     setEditing(card)
     setCorrectionRetry(latestAttempt(data.workspaceId, card.id))
     requestAnimationFrame(() => {
-      formArea.current?.scrollIntoView({ block: 'nearest' })
-      formArea.current?.querySelector<HTMLInputElement>('#work-date')?.focus({ preventScroll: true })
+      const field = formArea.current?.querySelector<HTMLInputElement>('#work-date')
+      field?.focus({ preventScroll: true })
+      field?.scrollIntoView({ block: 'nearest' })
     })
   }
 
@@ -419,8 +437,8 @@ export function WorkerView({ cardId, data, busy, writesBlocked, run, go }: ViewP
     <section className="worker-workspace" aria-labelledby="worker-title">
       <PageTitle role="worker" title="Log a timecard" description="Enter your shift and check its review status." data={data} />
       <div className="content-grid worker-grid worker-register">
-        <WorkerProjectRegister project={data.project} />
         <div className="view-stack" ref={formArea}>
+          <WorkerProjectRegister project={data.project} />
           {primaryCorrection && !editing && !cardId && (
             <aside className="correction-action" aria-labelledby="correction-title">
               <span className="step-icon"><CornerUpLeft size={20} /></span>
@@ -432,7 +450,7 @@ export function WorkerView({ cardId, data, busy, writesBlocked, run, go }: ViewP
             <section className="panel log-panel" aria-label="Linked timecard">
               <PanelTitle icon={<FileText size={20} />} title="Linked timecard" />
               <div className="panel-body">
-                {linkedCard ? <><CardSummary card={linkedCard} showCost={false} /><Audit card={linkedCard} /></>
+                {linkedCard ? <><CardSummary card={linkedCard} /><Audit card={linkedCard} /></>
                   : <p role="status">This timecard is unavailable in your current workspace.</p>}
                 <div className="form-actions">
                   {linkedCard?.status === 'returned' && <button className="button button-secondary" type="button" data-correct-card={linkedCard.id} onClick={() => edit(linkedCard)} disabled={busy}>Correct and resubmit</button>}
@@ -445,26 +463,50 @@ export function WorkerView({ cardId, data, busy, writesBlocked, run, go }: ViewP
               setRetryDraft={updateRetryDraft}
               checkRetry={(attempt) => void recover(attempt, true)} discardRetry={(attempt) => void discard(attempt)} />
           )}
-          {!cardId && <aside className="next-step"><ClipboardCheck size={17} aria-hidden="true" /><div><h3>After submission</h3><p>Your foreman reviews the shift.</p></div><button className="text-button" type="button" onClick={() => go('foreman')}>Open foreman view <ArrowUpRight size={15} /></button></aside>}
+          {!cardId && <aside className="next-step"><ClipboardCheck size={17} aria-hidden="true" /><div><h3>Next · Foreman review</h3><p>{data.foreman.name} reviews the shift before it can be approved.</p></div></aside>}
         </div>
-        <section className="panel" aria-label="My timecards">
-          <PanelTitle icon={<Clock3 size={20} />} title="My timecards"><span className="count-pill">{ownCards.length}</span></PanelTitle>
-          {sortedCards.length ? <div className="card-list">
-            {sortedCards.map((card) => (
-              <div className="card-list-item" key={card.id}>
-                <CardRow card={card} selected={openId === card.id} onClick={() => setOpenId((previous) => previous === card.id ? null : card.id)} />
-                {!cardId && card.status === 'returned' && card.id !== primaryCorrection?.id && <div className="row-correction"><p>{card.reason}</p><button className="text-button" type="button" data-correct-card={card.id} onClick={() => edit(card)} disabled={busy || editing?.id === card.id}>Correct and resubmit <ArrowUpRight size={14} /></button></div>}
-                {openId === card.id && <div className="inline-details"><Audit card={card} /></div>}
-              </div>
-            ))}
-          </div> : <Empty title="No timecards yet" text="Your submitted timecards will appear here." />}
+        <section className="panel worker-journal" aria-label="My timecards">
+          <PanelTitle icon={<Clock3 size={20} />} title="My timecards">
+            {recentCards.length < sortedCards.length && (
+              <button className="text-button worker-history-toggle" type="button" aria-expanded={showHistory} aria-controls="worker-journal-list"
+                aria-label={showHistory ? 'Show recent timecards' : `View all ${sortedCards.length} timecards`}
+                onClick={() => setShowHistory((visible) => !visible)}>{showHistory ? 'Show recent' : `View all ${sortedCards.length}`} <ChevronRight size={14} aria-hidden="true" /></button>
+            )}
+          </PanelTitle>
+          {displayedCards.length ? <>
+            <div className="worker-journal-head" aria-hidden="true"><span>Work date</span><span>Hours</span><span>Status</span></div>
+            <div id="worker-journal-list">
+              {displayedCards.map((card) => {
+                const open = openId === card.id
+                const selected = open || card.id === cardId || card.id === editing?.id
+                return (
+                  <div className="card-list-item" key={card.id}>
+                    <button className={`card-row worker-journal-row${selected ? ' card-row-selected' : ''}`} type="button"
+                      data-card-id={card.id} aria-expanded={open} aria-controls={open ? `worker-activity-${card.id}` : undefined}
+                      onClick={() => setOpenId((previous) => previous === card.id ? null : card.id)}>
+                      <span className="worker-journal-date"><span className="sr-only">View timecard for </span>
+                        <time dateTime={card.workDate}>{workDate(card.workDate)}</time><span className="worker-record-key">{timecardReference(card)}</span></span>
+                      <span className="worker-journal-hours">{card.hours} hrs</span>
+                      <Status status={card.status} />
+                      <ChevronRight className="row-chevron" size={16} aria-hidden="true" />
+                    </button>
+                    {!cardId && card.status === 'returned' && card.id !== primaryCorrection?.id && <div className="row-correction"><p>{card.reason}</p><button className="text-button" type="button" data-correct-card={card.id} onClick={() => edit(card)} disabled={busy || editing?.id === card.id}>Correct and resubmit <ArrowUpRight size={14} /></button></div>}
+                    {open && <div className="inline-details" id={`worker-activity-${card.id}`}><Audit card={card} /></div>}
+                  </div>
+                )
+              })}
+            </div>
+            <p className="worker-journal-foot">{showHistory || recentCards.length === sortedCards.length
+              ? `${sortedCards.length} ${sortedCards.length === 1 ? 'timecard' : 'timecards'}`
+              : `Showing ${recentCards.length} of ${sortedCards.length} timecards`}</p>
+          </> : <Empty title="No timecards yet" text="Your submitted timecards will appear here." />}
         </section>
       </div>
     </section>
   )
 }
 
-function ForemanDecision({ workspaceId, card, busy, writesBlocked, run, complete }: { workspaceId: string; card: Timecard; busy: boolean; writesBlocked?: boolean; run: RunMutation; complete: () => void }) {
+function ForemanDecision({ workspaceId, card, busy, writesBlocked, run, complete, showExampleCorrection }: { workspaceId: string; card: Timecard; busy: boolean; writesBlocked?: boolean; run: RunMutation; complete: () => void; showExampleCorrection: boolean }) {
   const [reviewedVersion, setReviewedVersion] = useState(card.version)
   const [returnVersion, setReturnVersion] = useState<number | null>(null)
   const [reason, setReason] = useState('')
@@ -512,7 +554,9 @@ function ForemanDecision({ workspaceId, card, busy, writesBlocked, run, complete
     })
   }
 
-  if (!pending && !returning) return <p className="read-only-detail">This timecard is no longer pending.</p>
+  if (!pending && !returning) {
+    return <p className="read-only-detail">This timecard is no longer pending. {card.status === 'returned' ? 'It is with the worker for correction.' : 'The cost is in the labour ledger.'}</p>
+  }
 
   return returning ? (
     <form className="return-form" onSubmit={(event) => { event.preventDefault(); void decide('return') }}>
@@ -525,8 +569,15 @@ function ForemanDecision({ workspaceId, card, busy, writesBlocked, run, complete
         </div>
       )}
       <label htmlFor="correction-note">Correction note</label>
+      <p className="foreman-note-help" id="foreman-correction-hint">The worker sees this note when they open the timecard to make changes.</p>
       <textarea ref={note} id="correction-note" value={reason} onChange={(event) => setReason(event.target.value)} required maxLength={300} rows={3} placeholder="Tell the worker what to change…" disabled={busy} readOnly={!pending || stale || !canReturn}
-        aria-invalid={invisibleReason || undefined} aria-describedby={invisibleReason ? 'correction-note-help' : undefined} />
+        aria-invalid={invisibleReason || undefined} aria-describedby={invisibleReason ? 'foreman-correction-hint correction-note-help' : 'foreman-correction-hint'} />
+      {showExampleCorrection && pending && canReturn && !stale && !busy && !writesBlocked && reason.length === 0 && (
+        <button className="text-button foreman-note-example" type="button" onClick={() => {
+          setReason(exampleCorrectionNote)
+          requestAnimationFrame(() => note.current?.focus())
+        }}>Use example note <ArrowRight size={14} /></button>
+      )}
       {invisibleReason && <p className="field-help" id="correction-note-help">Include a visible correction note.</p>}
       {pending && !canReturn && <p className="field-help">This timecard has reached its correction limit. It can still be approved.</p>}
       <div className="form-actions">
@@ -535,7 +586,12 @@ function ForemanDecision({ workspaceId, card, busy, writesBlocked, run, complete
       </div>
     </form>
   ) : (
-    <>
+    <div className="foreman-decision">
+      <h4>Review decision</h4>
+      <p>Approval posts this timecard to the labour ledger.</p>
+      {showExampleCorrection && canReturn && !stale && (
+        <p className="foreman-decision-example"><CornerUpLeft size={15} aria-hidden="true" /><span><strong>Try a correction.</strong> Return this entry and ask {card.workerName.split(' ')[0]} to include the final hour.</span></p>
+      )}
       {stale && <div className="draft-conflict review-conflict" role="alert">
         <strong>Timecard changed during your review.</strong>
         <p>Check the latest hours and work date above before making a decision.</p>
@@ -546,17 +602,41 @@ function ForemanDecision({ workspaceId, card, busy, writesBlocked, run, complete
         {canReturn && <button ref={returnButton} className="button button-secondary" type="button" onClick={() => setReturnVersion(reviewedVersion)} disabled={busy || writesBlocked || stale}><CornerUpLeft size={16} /> Return with a note</button>}
         <button className="button button-primary" type="button" onClick={() => void decide('approve')} disabled={busy || writesBlocked || stale}><Check size={17} /> Approve timecard</button>
       </div>
-    </>
+    </div>
   )
 }
 
 type CardSelection = { onSelectCard: (id: string, replace?: boolean) => void }
+
+function ForemanSource({ card }: { card: Timecard }) {
+  const approved = card.status === 'approved'
+  return (
+    <>
+      <div className="foreman-source-person">
+        <Status status={card.status} />
+        <h3>{card.workerName}</h3>
+        <p>Work date <time dateTime={card.workDate}>{workDate(card.workDate)}</time></p>
+      </div>
+      <dl className="foreman-source-facts">
+        <div><dt>Hours worked</dt><dd>{card.hours} hrs</dd></div>
+        <div><dt>{approved ? 'Applied rate' : 'Estimated rate'}</dt><dd>{card.rateCents === null ? 'Rate unavailable' : `${money(card.rateCents)}/hr`}</dd></div>
+      </dl>
+      <dl className="foreman-source-value">
+        <div><dt>{approved ? 'Posted labour' : 'Estimated labour'}</dt><dd>{timecardCost(card.costCents)}</dd></div>
+      </dl>
+    </>
+  )
+}
 
 export function ForemanView({ cardId, data, busy, writesBlocked, run, go, onSelectCard }: ViewProps & CardSelection) {
   const [filter, setFilter] = useState<'pending' | 'all'>(() => data.timecards.some((card) => card.id === cardId && card.status !== 'pending') ? 'all' : 'pending')
   const pending = data.timecards.filter((card) => card.status === 'pending')
   const shown = filter === 'pending' ? pending : data.timecards
   const selected = data.timecards.find((card) => card.id === cardId)
+  const returnedCount = data.timecards.filter((card) => card.status === 'returned').length
+  const showQueueContext = selected?.status === 'pending' && filter === 'pending' && pending.length < 3
+  const recent = !cardId || showQueueContext ? data.timecards.filter((card) => card.status === 'approved')
+    .sort((first, second) => (second.decisionAt ?? '').localeCompare(first.decisionAt ?? '')).slice(0, showQueueContext ? 3 : 4) : []
   const initialLink = useRef(cardId)
   const initialQueueCard = useRef(cardId === null ? pending[0]?.id : undefined)
   const review = useRef<HTMLElement>(null)
@@ -570,14 +650,30 @@ export function ForemanView({ cardId, data, busy, writesBlocked, run, go, onSele
 
   useEffect(() => {
     if (!initialLink.current) return
-    const frame = requestAnimationFrame(() => focusDetails(review.current))
+    const frame = requestAnimationFrame(() => focusDetails(review.current, undefined, review.current?.offsetWidth === queue.current?.offsetWidth))
     return () => cancelAnimationFrame(frame)
   }, [])
 
-  function select(card: Timecard, event: MouseEvent<HTMLButtonElement>) {
+  function select(card: Timecard, event?: MouseEvent<HTMLButtonElement>) {
+    if (card.status !== 'pending') setFilter('all')
     onSelectCard(card.id)
-    requestAnimationFrame(() => focusDetails(review.current, event))
+    requestAnimationFrame(() => focusDetails(review.current, event, review.current?.offsetWidth === queue.current?.offsetWidth))
   }
+
+  const recentApprovals = recent.length > 0 && (
+    <div className="foreman-recent">
+      <h3>Recent approvals</h3>
+      <ul>
+        {recent.map((card) => <li key={card.id}>
+          <button type="button" aria-controls="timecard-review" onClick={() => select(card)}>
+            <span><strong>{card.workerName}</strong><time dateTime={card.workDate}>{workDate(card.workDate)}</time></span>
+            <span>{card.hours} hrs</span>
+            <ChevronRight size={15} aria-hidden="true" />
+          </button>
+        </li>)}
+      </ul>
+    </div>
+  )
 
   return (
     <section className="foreman-workspace" aria-labelledby="foreman-title">
@@ -590,12 +686,25 @@ export function ForemanView({ cardId, data, busy, writesBlocked, run, go, onSele
             <button type="button" aria-pressed={filter === 'all'} onClick={() => setFilter('all')}>All timecards</button>
           </div>
           {shown.length ? <div className="card-list">
-            {shown.map((card) => <div className="card-list-item" key={card.id}><CardRow card={card} selected={selected?.id === card.id} controls="timecard-review" onClick={(event) => select(card, event)} /></div>)}
+            {shown.map((card) => <div className="card-list-item" key={card.id}><CardRow card={card} selected={selected?.id === card.id} onClick={(event) => select(card, event)} /></div>)}
           </div> : (
-            <Empty title="You’re caught up" text="New submissions and corrected timecards will appear here.">
-              <button className="text-button" type="button" onClick={() => go('worker')}>Open worker view <ArrowUpRight size={15} /></button>
-            </Empty>
+            <div className="foreman-queue-empty">
+              <ClipboardCheck size={19} aria-hidden="true" />
+              <div>
+                <h3>{filter === 'pending' ? 'Queue clear' : 'No timecards yet'}</h3>
+                <p>Submitted and corrected timecards appear here when they’re ready for review.</p>
+                <button className="text-button" type="button" onClick={() => go('worker')}>Open worker view <ArrowUpRight size={15} /></button>
+              </div>
+            </div>
           )}
+          {returnedCount > 0 && filter === 'pending' && (
+            <div className="foreman-queue-returned">
+              <CornerUpLeft size={15} aria-hidden="true" />
+              <span>{returnedCount} {returnedCount === 1 ? 'timecard' : 'timecards'} with workers for correction</span>
+              <button className="text-button" type="button" onClick={() => setFilter('all')}>View all <ArrowRight size={14} /></button>
+            </div>
+          )}
+          {showQueueContext && recentApprovals}
         </section>
         <section className="panel review-panel foreman-review" id="timecard-review" aria-label="Timecard review" ref={review} tabIndex={-1}>
           <PanelTitle icon={<FileText size={17} />} title="Timecard review">
@@ -606,13 +715,21 @@ export function ForemanView({ cardId, data, busy, writesBlocked, run, go, onSele
           </PanelTitle>
           {selected ? <div className="foreman-review-body">
             <div className="foreman-source">
-              <CardSummary card={selected} showCost />
-              <ForemanDecision key={selected.id} workspaceId={data.workspaceId} card={selected} busy={busy} writesBlocked={writesBlocked} run={run} complete={() => setFilter('all')} />
+              <ForemanSource card={selected} />
+              <ForemanDecision key={selected.id} workspaceId={data.workspaceId} card={selected} busy={busy} writesBlocked={writesBlocked} run={run}
+                showExampleCorrection={isDemoWorker(selected, data.worker) && selected.hours === exampleInitialHours} complete={() => setFilter('all')} />
             </div>
-            <div className="foreman-history"><Audit card={selected} /></div>
+            <div className="foreman-history">
+              <Audit card={selected} />
+              {selected.audit.length > 0 && <p className="foreman-history-zone">Project time · Toronto</p>}
+            </div>
           </div> : cardId
             ? <Empty title="Selected timecard unavailable" text="Choose another timecard from the review queue." />
-            : <Empty title="No timecard selected" text="Open a timecard from the queue to see its hours and activity." />}
+            : <div className="foreman-review-idle">
+              <h3>Crew activity</h3>
+              <p>No timecard selected. Open a submission from the queue to check its hours and make a decision.</p>
+              {recentApprovals}
+            </div>}
         </section>
       </div>
     </section>

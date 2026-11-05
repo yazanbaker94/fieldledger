@@ -52,6 +52,7 @@ interface AuditEvent {
 
 interface Timecard {
   id: string;
+  workerId: string;
   workerName: string;
   workDate: string;
   hours: number;
@@ -72,7 +73,7 @@ export interface Workspace {
   workspaceId: string;
   affectedCardId?: string;
   project: { id: string; name: string; code: string; location: string; budgetCents: number; approvedCents: number; pendingCents: number };
-  worker: { name: string };
+  worker: { id: string; name: string };
   foreman: { name: string };
   manager: { name: string };
   timecards: Timecard[];
@@ -83,7 +84,7 @@ export async function readWorkspace(db: Pool | PoolClient, session: string, fixt
   // so their audit IDs preserve posting order even when the transaction timestamps overlap.
   const result = await db.query<{ workspace: Workspace }>(`
     WITH visible_cards AS (
-      SELECT card.id, worker.name AS "workerName", to_char(card.work_date, 'YYYY-MM-DD') AS "workDate", card.hours,
+      SELECT card.id, worker.id AS "workerId", worker.name AS "workerName", to_char(card.work_date, 'YYYY-MM-DD') AS "workDate", card.hours,
         card.status, card.version, (card.status = 'pending' AND card.version <= $5) AS "canReturn",
         card.submitted_at AS "submittedAt", card.decision_at AS "decisionAt",
         reviewer.name AS "decisionBy", card.reason,
@@ -131,7 +132,7 @@ export async function readWorkspace(db: Pool | PoolClient, session: string, fixt
       'workspaceId', session.workspace_id,
       'project', json_build_object('id', project.id, 'name', project.name, 'code', project.code, 'location', project.location,
         'budgetCents', project.budget_cents, 'approvedCents', card_totals.approved, 'pendingCents', card_totals.pending),
-      'worker', json_build_object('name', worker.name), 'foreman', json_build_object('name', foreman.name),
+      'worker', json_build_object('id', worker.id, 'name', worker.name), 'foreman', json_build_object('name', foreman.name),
       'manager', json_build_object('name', manager.name), 'timecards', card_totals.cards
     ) AS workspace
     FROM demo_sessions session JOIN projects project ON project.id = session.project_id

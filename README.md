@@ -6,11 +6,11 @@ FieldLedger is a working construction timecard and labour-costing demo. It follo
 
 ## Try the workflow
 
-1. As **Worker**, submit a timecard for eight hours. The project is already assigned. Select **Go to foreman** to open that card.
-2. As **Foreman**, approve the card or return it with a note. **Go to worker** opens the returned card for correction. Resubmit it and follow the card back to the foreman for approval.
+1. As **Worker**, choose **Use 7 hours** in the correction walkthrough, then submit the timecard. Select **Go to foreman** to open that card.
+2. As **Foreman**, choose **Return with a note**, then **Use example note** and send it back. **Go to worker** opens the same card. Choose **Use 8 hours**, resubmit, and return to Foreman to approve it.
 3. After approval, **Go to manager** traces the saved posting. Each layer in the Cost Trail represents an hour of work. The eight hours add CAD $400 to the CAD $9,700 already approved, taking the project CAD $100 over its CAD $10,000 labour budget. Select a ledger row to inspect its source timecard and cost.
 
-Each browser gets its own demo workspace backed by PostgreSQL. Refreshing the page preserves its data during the 24-hour session. If a tab is still running an older build when its session ends, reload the page to open a new workspace. The role switcher is intentionally available to demo visitors. **Reset demo** restores that browser's starting data. The contractor, workers, rates, and project data are fictional.
+Each browser gets its own demo workspace backed by PostgreSQL. Refreshing the page preserves its data during the 24-hour session. If a tab is still running an older build when its session ends, reload the page to open a new workspace. The role switcher is intentionally available to demo visitors. **Reset demo** restores the starting budget and fictional crew history.
 
 ## Screens from the running app
 

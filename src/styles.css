@@ -185,12 +185,9 @@ svg { display: block; flex-shrink: 0; }
 .card-summary-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .card-summary-header h3 { margin-top: 2px; font-size: 1.38rem; letter-spacing: -.04em; }
 .card-facts { margin: 13px 0 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
-.card-facts.has-cost { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .card-facts > div { min-width: 0; padding: 9px; background: #f2f3ed; border-radius: 8px; }
 .card-facts dt { color: var(--muted); font-size: .72rem; line-height: 1.3; }
 .card-facts dd { margin: 4px 0 0; font-size: .86rem; font-weight: 730; line-height: 1.3; }
-.cost-calculation { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 9px; margin-top: 10px; color: var(--muted); font-size: .77rem; }
-.cost-calculation strong { color: var(--ink); font-variant-numeric: tabular-nums; }
 .audit { border-top: 1px solid #e2e5df; margin-top: 17px; padding-top: 14px; }
 .audit h3 { font-size: .85rem; }
 .audit ol { display: grid; gap: 0; list-style: none; margin: 8px 0 0; padding: 0; }
@@ -302,7 +299,6 @@ svg { display: block; flex-shrink: 0; }
   .card-row { gap: 7px; padding-inline: 6px; }
   .card-row-icon { width: 30px; height: 30px; }
   .card-summary-header { flex-wrap: wrap; }
-  .card-facts.has-cost { grid-template-columns: repeat(auto-fit, minmax(min(100%, 4.7rem), 1fr)); }
   .row-correction, .inline-details { padding-left: 43px; }
   .notice, .error-message { margin-top: -5px; }
   .notice { flex-wrap: wrap; }

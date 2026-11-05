@@ -4,6 +4,7 @@ export type ApprovalPosting = { cardId: string; beforeCents: number; afterCents:
 
 export type Timecard = {
   id: string
+  workerId?: string
   workerName: string
   workDate: string
   hours: number
@@ -41,7 +42,7 @@ export type Workspace = {
     approvedCents: number
     pendingCents: number
   }
-  worker: { name: string }
+  worker: { id?: string; name: string }
   foreman: { name: string }
   manager: { name: string }
   timecards: Timecard[]

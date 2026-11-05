@@ -27,9 +27,9 @@ const roles = [
 ] as const
 
 const steps = [
-  { title: 'Log the shift', detail: 'The worker submits hours on their phone and tracks the status of each timecard.', icon: ClipboardPenLine },
-  { title: 'Review the work', detail: 'The foreman approves the timecard or sends it back with a note for the worker.', icon: ClipboardCheck },
-  { title: 'See the cost', detail: 'The manager sees approved labour against budget and can open the timecard behind each charge.', icon: ChartNoAxesCombined },
+  { title: 'Submit the first entry', detail: 'Start with a seven-hour timecard as Maya Chen, then open it in the foreman’s review queue.', icon: ClipboardPenLine },
+  { title: 'Return and correct it', detail: 'Send the timecard back with a note about the missing hour. Update it to eight hours as Maya and resubmit.', icon: ClipboardCheck },
+  { title: 'Approve and trace the cost', detail: 'Approve as foreman, then open the Manager view to follow the $400 posting into the labour budget.', icon: ChartNoAxesCombined },
 ]
 
 function readRoute(): Route {

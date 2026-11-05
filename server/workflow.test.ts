@@ -125,8 +125,28 @@ test('field timecards against PostgreSQL', async (context) => {
     assert.equal(original.data.project.approvedCents, 970_000);
     assert.equal(original.data.project.pendingCents, 0);
     assert.equal(original.data.timecards.length, 25);
-    assert.equal(original.data.timecards[0].audit[0].workDate, original.data.timecards[0].workDate);
-    assert.equal(original.data.timecards[0].audit[0].hours, original.data.timecards[0].hours);
+    assert.deepEqual(original.data.worker, { id: 'maya', name: 'Maya Chen' });
+    assert.deepEqual([...new Set(original.data.timecards.map((card) => card.workerName))].sort(), [
+      'Imani Brooks', 'Joel Santos', 'Maya Chen', 'Nadia Haddad',
+    ]);
+    let approvedCents = 0;
+    for (const card of [...original.data.timecards].reverse()) {
+      assert.equal(card.approvedBeforeCents, approvedCents);
+      assert.equal(card.status, 'approved');
+      assert.equal(card.audit[0].actor, card.workerName);
+      assert.equal(card.audit[0].workDate, card.workDate);
+      assert.equal(card.audit[0].hours, card.hours);
+      assert.ok(card.costCents !== null);
+      approvedCents += card.costCents;
+    }
+    assert.equal(approvedCents, original.data.project.approvedCents);
+    assert.equal(original.data.timecards.at(-1)?.costCents, 10_000);
+    assert.ok(new Set(original.data.timecards.map((card) => card.rateCents)).size > 1);
+    const teammate = original.data.timecards.find((card) => card.workerId !== original.data.worker.id);
+    assert.ok(teammate);
+    assert.equal((await first(`/timecards/${teammate.id}/resubmit`, {
+      role: 'worker', body: { workDate: teammate.workDate, hours: teammate.hours, version: teammate.version },
+    })).status, 403);
     assert.equal(other.data.project.approvedCents, 970_000);
     assert.notEqual(original.data.workspaceId, other.data.workspaceId);
     assert.notEqual(original.data.workspaceId, original.setCookie?.split(';')[0].split('=')[1]);
@@ -504,10 +524,13 @@ test('field timecards against PostgreSQL', async (context) => {
     subtest.after(() => pool.query('DELETE FROM labour_rates WHERE project_id = $1 AND worker_id = $2 AND effective_from = $3',
       [fixtures.project.id, fixtures.worker.id, effectiveDate]).then(() => undefined));
     const { workspace: after } = await newWorkspace(pool, changedFixtures);
+    const originalByShift = new Map(before.timecards.map((card) => [`${card.workerId}:${card.workDate}`, card]));
     const expected = after.timecards.reduce((total, card) => {
-      const rate = card.workDate >= effectiveDate ? 6000 : 5000;
+      const original = originalByShift.get(`${card.workerId}:${card.workDate}`);
+      assert.ok(original && original.rateCents !== null);
+      const rate = card.workerId === before.worker.id && card.workDate >= effectiveDate ? 6000 : original.rateCents;
       assert.equal(card.rateCents, rate);
-      return total + rate * card.hours;
+      return total + Math.round(rate * card.hours);
     }, 0);
     assert.equal(after.project.approvedCents, expected);
     assert.equal((await readWorkspace(pool, updatedSession, changedFixtures))?.project.approvedCents, 970_000);

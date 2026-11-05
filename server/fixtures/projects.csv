@@ -1,2 +1,2 @@
-id,name,code,location,budget_cents
-riverside,Riverside Road Renewal,RIV-024,"Ottawa, ON",1000000
+id,name,code,location,budget_cents,demo_worker_id
+riverside,Riverside Road Renewal,RIV-024,"Ottawa, ON",1000000,maya

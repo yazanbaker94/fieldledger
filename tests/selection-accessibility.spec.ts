@@ -134,9 +134,9 @@ test("the full workflow reflows at 320px with 200% text", async ({ page }) => {
     })).toBe(true);
   }
 
-  async function expectReadableDate() {
-    await expectTextToFit(".card-row-title strong");
-    const dateLines = await page.locator(".card-row-title strong").first().evaluate((element) => {
+  async function expectReadableDate(selector: string) {
+    await expectTextToFit(selector);
+    const dateLines = await page.locator(selector).first().evaluate((element) => {
       const range = document.createRange();
       range.selectNodeContents(element);
       return range.getClientRects().length;
@@ -151,11 +151,11 @@ test("the full workflow reflows at 320px with 200% text", async ({ page }) => {
     caption.getBoundingClientRect().top >= caption.parentElement!.getBoundingClientRect().top)).toBe(true);
   await button(page, "Try the demo").click();
   await expectTextToFit(".workspace-heading h1");
-  await expectReadableDate();
+  await expectReadableDate(".worker-journal-date time");
   await submit(page, "7");
   await button(page, "Go to foreman").click();
   await expectTextToFit(".workspace-heading h1");
-  await expectReadableDate();
+  await expectReadableDate(".foreman-queue .card-row-title time");
   await button(page, "Return with a note").click();
   await page.getByLabel("Correction note").fill("Please confirm the final hour.");
   await button(page, "Send back to worker").click();
