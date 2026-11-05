@@ -1,0 +1,9 @@
+<resources>
+    <string name="app_name">FieldLedger</string>
+    <style name="Theme.FieldLedger.Base" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">#ECEAE2</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:colorAccent">#87512F</item>
+    </style>
+    <style name="Theme.FieldLedger" parent="Theme.FieldLedger.Base" />
+</resources>
